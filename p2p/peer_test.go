@@ -35,9 +35,34 @@ func TestPeerBasic(t *testing.T) {
 	require.Nil(err)
 	defer p.Stop()
 
+	fmt.Sprintf(p.SocketAddr().String());
+
 	assert.True(p.IsRunning())
 	assert.True(p.IsOutbound())
 	assert.False(p.IsPersistent())
+	p.persistent = true
+	assert.True(p.IsPersistent())
+	assert.Equal(rp.Addr().DialString(), p.RemoteAddr().String())
+	assert.Equal(rp.ID(), p.ID())
+}
+
+func TestMarlinPeerBasic(t *testing.T) {
+	assert, require := assert.New(t), require.New(t)
+
+	// simulate remote peer
+	rp := &remotePeer{PrivKey: ed25519.GenPrivKey(), Config: cfg}
+	rp.Start()
+	defer rp.Stop()
+
+	p, err := createMarlinOutboundPeer(rp.Addr(), cfg, true, true)
+	require.Nil(err)
+
+	err = p.Start()
+	require.Nil(err)
+	defer p.Stop()
+
+	assert.True(p.IsRunning())
+	assert.True(p.IsOutbound())
 	p.persistent = true
 	assert.True(p.IsPersistent())
 	assert.Equal(rp.Addr().DialString(), p.RemoteAddr().String())
@@ -64,6 +89,60 @@ func TestPeerSend(t *testing.T) {
 
 	assert.True(p.CanSend(testCh))
 	assert.True(p.Send(testCh, []byte("Asylum")))
+}
+
+func TestMarlinPeerSend(t *testing.T) {
+	assert, require := assert.New(t), require.New(t)
+
+	config := cfg
+
+	na, err := NewNetAddressString("0000000000000000000000000000000000000000@0.0.0.0:8000")
+	require.Nil(err)
+
+	p, err := createMarlinOutboundPeer(na, config, true, true)
+	require.Nil(err)
+
+	err = p.Start()
+	require.Nil(err)
+
+	defer p.Stop()
+
+	assert.True(p.CanSend(testCh))
+	assert.True(p.Send(testCh, []byte("Asylum")))
+}
+
+func createMarlinOutboundPeer(
+	addr *NetAddress,
+	config *config.P2PConfig,
+	outbound bool,
+	persistent bool,
+) (*marlinPeer, error) {
+
+	chDescs := []*tmconn.ChannelDescriptor{
+		{ID: testCh, Priority: 1},
+	}
+	reactorsByCh := map[byte]Reactor{testCh: NewTestReactor(chDescs, true)}
+
+
+	var pc peerConn
+
+	if config.TestDialFail {
+		return nil, fmt.Errorf("dial err (peerConfig.DialFail == true)")
+	}
+	conn, err := addr.DialTimeout(cfg.DialTimeout)
+	if err != nil {
+		return nil, err
+	}
+
+	// upgrage secret connection to be skipped
+	// pc, err = testPeerConn(conn, config, true, persistent, ourNodePrivKey, addr)
+	pc = newPeerConn(outbound, persistent, conn, addr)
+
+	peerNodeInfo:= testNodeInfo(addr.ID, "host_peer")
+
+	p := newMarlinPeer(pc, peerNodeInfo, reactorsByCh, chDescs, func(p Peer, r interface{}) {})
+	p.SetLogger(log.TestingLogger().With("peer", addr))
+	return p, nil
 }
 
 func createOutboundPeerAndPerformHandshake(

@@ -10,6 +10,9 @@ import (
 	"github.com/tendermint/tendermint/libs/service"
 
 	tmconn "github.com/tendermint/tendermint/p2p/conn"
+
+	"bufio"
+	"encoding/binary"
 )
 
 const metricsTickerDuration = 10 * time.Second
@@ -397,4 +400,293 @@ func createMConnection(
 		onError,
 		config,
 	)
+}
+
+// marlinPeer implements Peer.
+type marlinPeer struct {
+	service.BaseService
+
+	// raw peerConn and the multiplex connection
+	peerConn
+
+	// peer's node info and the channel it knows about
+	// channels = nodeInfo.Channels
+	// cached to avoid copying nodeInfo in hasChannel
+	nodeInfo NodeInfo
+	channels []byte
+
+	// User data
+	Data *cmap.CMap
+
+	metrics       *Metrics
+	metricsTicker *time.Ticker
+
+	bufConnReader *bufio.Reader
+	bufConnWriter *bufio.Writer
+
+	// send          chan struct{}
+	// sendQueue     chan []byte
+	// sendQueueSize int32 // atomic.
+
+	// recving       []byte
+	// sending       []byte
+}
+
+type MarlinPeerOption func(*marlinPeer)
+
+func newMarlinPeer(
+	pc peerConn,
+	nodeInfo NodeInfo,
+	reactorsByCh map[byte]Reactor,
+	chDescs []*tmconn.ChannelDescriptor,
+	onPeerError func(Peer, interface{}),
+	options ...MarlinPeerOption,
+) *marlinPeer {
+	p := &marlinPeer{
+		peerConn:      pc,
+		nodeInfo:      nodeInfo,
+		channels:      nodeInfo.(DefaultNodeInfo).Channels, // TODO
+		Data:          cmap.NewCMap(),
+		metricsTicker: time.NewTicker(metricsTickerDuration),
+		metrics:       NopMetrics(),
+		bufConnReader: bufio.NewReaderSize(pc.conn, 1024),
+		bufConnWriter: bufio.NewWriterSize(pc.conn, 65536),
+	}
+
+
+	p.BaseService = *service.NewBaseService(nil, "MarlinPeer", p)
+	for _, option := range options {
+		option(p)
+	}
+
+	return p
+}
+
+// String representation.
+func (p *marlinPeer) String() string {
+	if p.outbound {
+		return fmt.Sprintf("Peer{%v out}", p.ID())
+	}
+
+	return fmt.Sprintf("Peer{%v in}", p.ID())
+}
+
+//---------------------------------------------------
+// Implements service.Service
+
+// SetLogger implements BaseService.
+func (p *marlinPeer) SetLogger(l log.Logger) {
+	p.Logger = l
+}
+
+// OnStart implements BaseService.
+func (p *marlinPeer) OnStart() error {
+	if err := p.BaseService.OnStart(); err != nil {
+		return err
+	}
+
+	// go p.sendRoutine()
+	// go p.recvRoutine()
+	return nil
+}
+
+// FlushStop mimics OnStop but additionally ensures that all successful
+// .Send() calls will get flushed before closing the connection.
+// NOTE: it is not safe to call this method more than once.
+func (p *marlinPeer) FlushStop() {
+	p.BaseService.OnStop()
+	p.FlushStop() // stop everything and close the conn
+}
+
+// OnStop implements BaseService.
+func (p *marlinPeer) OnStop() {
+	p.BaseService.OnStop()
+}
+
+//---------------------------------------------------
+// Implements Peer
+
+// ID returns the peer's ID - the hex encoded hash of its pubkey.
+func (p *marlinPeer) ID() ID {
+	return p.nodeInfo.ID()
+}
+
+// IsOutbound returns true if the connection is outbound, false otherwise.
+func (p *marlinPeer) IsOutbound() bool {
+	return p.peerConn.outbound
+}
+
+// IsPersistent returns true if the peer is persitent, false otherwise.
+func (p *marlinPeer) IsPersistent() bool {
+	return p.peerConn.persistent
+}
+
+// NodeInfo returns a copy of the peer's NodeInfo.
+func (p *marlinPeer) NodeInfo() NodeInfo {
+	return p.nodeInfo
+}
+
+// SocketAddr returns the address of the socket.
+// For outbound peers, it's the address dialed (after DNS resolution).
+// For inbound peers, it's the address returned by the underlying connection
+// (not what's reported in the peer's NodeInfo).
+func (p *marlinPeer) SocketAddr() *NetAddress {
+	return p.peerConn.socketAddr
+}
+
+// Send msg bytes to the channel identified by chID byte. Returns false if the
+// send queue is full after timeout, specified by MConnection.
+func (p *marlinPeer) Send(chID byte, msgBytes []byte) bool {
+	if !p.IsRunning() {
+		// see Switch#Broadcast, where we fetch the list of peers and loop over
+		// them - while we're looping, one peer may be removed and stopped.
+		return false
+	} else if !p.hasChannel(chID) {
+		return false
+	}
+
+	chIDLength := 1
+	length := chIDLength + len(msgBytes)
+
+	fmt.Printf("%d\n",length)
+
+	var err error
+
+	// write 8 bit length
+	buf := make([]byte, 8)
+	binary.BigEndian.PutUint64(buf, uint64(length))
+	_, err = p.bufConnWriter.Write(buf)
+
+	if err != nil {
+		p.Logger.Debug("Failed to write prefixed length")
+		return false
+	}
+
+	// write channel id
+	err = p.bufConnWriter.WriteByte(byte(chID))
+	if err != nil {
+		p.Logger.Debug("Failed to write channel")
+		return false
+	}
+
+	// write the message buffer
+	_, err = p.bufConnWriter.Write(msgBytes)
+	p.bufConnWriter.Flush()
+
+	if (err != nil) {
+		p.Logger.Debug("Failed to write prefixed length")
+		return false
+	}
+
+	return true
+}
+
+/*
+// TrySend msg bytes to the channel identified by chID byte. Immediately returns
+// false if the send queue is full.
+func (p *marlinPeer) TrySend(chID byte, msgBytes []byte) bool {
+	if !p.IsRunning() {
+		return false
+	} else if !p.hasChannel(chID) {
+		return false
+	}
+
+	msgBytes = length + 1(for channel byte) + msgBytes;
+
+	res = p.trySendBytes(msgBytes)
+	if res {
+		// Wake up sendRoutine if necessary
+		select {
+		case c.send <- struct{}{}:
+		default:
+		}
+
+		labels := []string{
+			"peer_id", string(p.ID()),
+			"chID", fmt.Sprintf("%#x", chID),
+		}
+		p.metrics.PeerSendBytesTotal.With(labels...).Add(float64(len(msgBytes)))
+	}
+
+	return res
+}
+
+
+// Queues message to send to this channel.
+// Goroutine-safe
+// Times out (and returns false) after defaultSendTimeout
+func (p *marlinPeer) sendBytes(bytes []byte) bool {
+	select {
+	case p.sendQueue <- bytes:
+		atomic.AddInt32(&p.sendQueueSize, 1)
+		return true
+	case <-time.After(defaultSendTimeout):
+		return false
+	}
+}
+
+// Queues message to send to this channel.
+// Nonblocking, returns true if successful.
+// Goroutine-safe
+func (p *marlinPeer) trySendBytes(bytes []byte) bool {
+	select {
+	case p.sendQueue <- bytes:
+		atomic.AddInt32(&p.sendQueueSize, 1)
+		return true
+	default:
+		return false
+	}
+}
+*/
+
+// Get the data for a given key.
+func (p *marlinPeer) Get(key string) interface{} {
+	return p.Data.Get(key)
+}
+
+// Set sets the data for the given key.
+func (p *marlinPeer) Set(key string, data interface{}) {
+	p.Data.Set(key, data)
+}
+
+// hasChannel returns true if the peer reported
+// knowing about the given chID.
+func (p *marlinPeer) hasChannel(chID byte) bool {
+	for _, ch := range p.channels {
+		if ch == chID {
+			return true
+		}
+	}
+	// NOTE: probably will want to remove this
+	// but could be helpful while the feature is new
+	p.Logger.Debug(
+		"Unknown channel for peer",
+		"channel",
+		chID,
+		"channels",
+		p.channels,
+	)
+	return false
+}
+
+// CloseConn closes original connection. Used for cleaning up in cases where the peer had not been started at all.
+func (p *marlinPeer) CloseConn() error {
+	return p.peerConn.conn.Close()
+}
+
+//---------------------------------------------------
+// methods only used for testing
+// TODO: can we remove these?
+
+// RemoteAddr returns peer's remote network address.
+func (p *marlinPeer) RemoteAddr() net.Addr {
+	return p.peerConn.conn.RemoteAddr()
+}
+
+// CanSend returns true if the send queue is not full, false otherwise.
+func (p *marlinPeer) CanSend(chID byte) bool {
+	if !p.IsRunning() {
+		return false
+	}
+	return true
 }
