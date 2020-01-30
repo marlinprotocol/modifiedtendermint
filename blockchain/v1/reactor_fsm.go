@@ -182,7 +182,9 @@ func init() {
 			case startFSMEv:
 				// Broadcast Status message. Currently doesn't return non-nil error.
 				fsm.toBcR.sendStatusRequest()
-				return waitForPeer, nil
+				//amolcomment-directly going to finished state
+				//return waitForPeer, nil
+				return finished, nil
 
 			case stopFSMEv:
 				return finished, errNoErrorFinished

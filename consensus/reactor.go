@@ -76,6 +76,8 @@ func (conR *Reactor) OnStart() error {
 
 	conR.subscribeToBroadcastEvents()
 
+	//amolcomment-insert marlin goroutine to gothrough queue and sendmessages
+
 	if !conR.FastSync() {
 		err := conR.conS.Start()
 		if err != nil {
@@ -180,6 +182,8 @@ func (conR *Reactor) AddPeer(peer p2p.Peer) {
 		panic(fmt.Sprintf("peer %v has no state", peer))
 	}
 	// Begin routines for this peer.
+
+	// amolcomment switching off gossips
 	go conR.gossipDataRoutine(peer, peerState)
 	go conR.gossipVotesRoutine(peer, peerState)
 	go conR.queryMaj23Routine(peer, peerState)
@@ -187,7 +191,8 @@ func (conR *Reactor) AddPeer(peer p2p.Peer) {
 	// Send our state to peer.
 	// If we're fast_syncing, broadcast a RoundStepMessage later upon SwitchToConsensus().
 	if !conR.FastSync() {
-		conR.sendNewRoundStepMessage(peer)
+		// amolcomment: To fool the peer by not telling actual state and hence the height
+		// conR.sendNewRoundStepMessage(peer)
 	}
 }
 
@@ -216,6 +221,16 @@ func (conR *Reactor) Receive(chID byte, src p2p.Peer, msgBytes []byte) {
 		return
 	}
 
+	// amolcomment-sending to tendermint if received from marlin peer
+	if (src.ID() == "0000000000000000000000000000000000000000") {
+		conR.Logger.Info("Received by marlin", "src", src, "chId", chID, "bytes", msgBytes)
+		conR.Switch.Broadcast(chID, msgBytes)
+		return
+	}
+
+	// amolcomment-sending everything on marlin peer
+	conR.Switch.SendOnMarlinPeer(chID,msgBytes)
+
 	msg, err := decodeMsg(msgBytes)
 	if err != nil {
 		conR.Logger.Error("Error decoding message", "src", src, "chId", chID, "msg", msg, "err", err, "bytes", msgBytes)
@@ -242,6 +257,11 @@ func (conR *Reactor) Receive(chID byte, src p2p.Peer, msgBytes []byte) {
 		switch msg := msg.(type) {
 		case *NewRoundStepMessage:
 			ps.ApplyNewRoundStepMessage(msg)
+			// amolcomment: Reflecting back the peers own height
+			if conR.conS.Height <= msg.Height {
+				src.Send(StateChannel, cdc.MustMarshalBinaryBare(msg))
+			}
+			// amolcomment: update height, r, s here?
 		case *NewValidBlockMessage:
 			ps.ApplyNewValidBlockMessage(msg)
 		case *HasVoteMessage:
@@ -402,8 +422,9 @@ func (conR *Reactor) unsubscribeFromBroadcastEvents() {
 }
 
 func (conR *Reactor) broadcastNewRoundStepMessage(rs *cstypes.RoundState) {
-	nrsMsg := makeRoundStepMessage(rs)
-	conR.Switch.Broadcast(StateChannel, cdc.MustMarshalBinaryBare(nrsMsg))
+	// nrsMsg := makeRoundStepMessage(rs)
+	//amolcomment-turning off this broadcast
+	// conR.Switch.Broadcast(StateChannel, cdc.MustMarshalBinaryBare(nrsMsg))
 }
 
 func (conR *Reactor) broadcastNewValidBlockMessage(rs *cstypes.RoundState) {

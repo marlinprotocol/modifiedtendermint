@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"time"
+	"io"
 
 	"github.com/tendermint/tendermint/libs/cmap"
 	"github.com/tendermint/tendermint/libs/log"
@@ -402,6 +403,15 @@ func createMConnection(
 	)
 }
 
+// Blockchain Reactor Events (the input to the state machine)
+type recvState uint
+
+const (
+	// message type events
+	lengthWait = iota + 1
+	messageWait
+)
+
 // marlinPeer implements Peer.
 type marlinPeer struct {
 	service.BaseService
@@ -423,6 +433,11 @@ type marlinPeer struct {
 
 	bufConnReader *bufio.Reader
 	bufConnWriter *bufio.Writer
+
+	peerRecvState uint
+	bytesPending  uint64
+
+	rctByCh map[byte]Reactor
 
 	// send          chan struct{}
 	// sendQueue     chan []byte
@@ -451,6 +466,13 @@ func newMarlinPeer(
 		metrics:       NopMetrics(),
 		bufConnReader: bufio.NewReaderSize(pc.conn, 1024),
 		bufConnWriter: bufio.NewWriterSize(pc.conn, 65536),
+		peerRecvState: lengthWait,
+		bytesPending:  8,
+		rctByCh:       make(map[byte]Reactor),
+	}
+
+	for k, v := range reactorsByCh {
+		p.rctByCh[k] = v
 	}
 
 
@@ -486,7 +508,7 @@ func (p *marlinPeer) OnStart() error {
 	}
 
 	// go p.sendRoutine()
-	// go p.recvRoutine()
+	go p.recvRoutine()
 	return nil
 }
 
@@ -534,14 +556,22 @@ func (p *marlinPeer) SocketAddr() *NetAddress {
 	return p.peerConn.socketAddr
 }
 
+// Status returns the peer's ConnectionStatus.
+func (p *marlinPeer) Status() tmconn.ConnectionStatus {
+	var status tmconn.ConnectionStatus
+	return status
+}
+
 // Send msg bytes to the channel identified by chID byte. Returns false if the
 // send queue is full after timeout, specified by MConnection.
 func (p *marlinPeer) Send(chID byte, msgBytes []byte) bool {
 	if !p.IsRunning() {
 		// see Switch#Broadcast, where we fetch the list of peers and loop over
 		// them - while we're looping, one peer may be removed and stopped.
+		p.Logger.Debug("marlin peer not running")
 		return false
 	} else if !p.hasChannel(chID) {
+		p.Logger.Debug("marlin peer does not have channel")
 		return false
 	}
 
@@ -581,63 +611,163 @@ func (p *marlinPeer) Send(chID byte, msgBytes []byte) bool {
 	return true
 }
 
-/*
+func (p *marlinPeer) ReadFrame() ([]byte, error) {
+	var err error
+
+	lenBuf, frameLength, err := p.getFrameLength()
+	if err != nil {
+		return nil, err
+	}
+
+	chIDLength := 1
+	chID := make([]byte, chIDLength)
+	_, err = io.ReadFull(p.bufConnReader, chID)
+	if err != nil {
+		return nil, err
+	}
+
+	// real message length
+	msgLength := int(frameLength) - chIDLength
+	msg := make([]byte, msgLength)
+	_, err = io.ReadFull(p.bufConnReader, msg)
+	if err != nil {
+		return nil, err
+	}
+
+	fullMessage := make([]byte, len(lenBuf)+ int(frameLength))
+	copy(fullMessage, lenBuf)
+	copy(fullMessage[len(lenBuf):], chID)
+	copy(fullMessage[len(lenBuf) + chIDLength :], msg)
+
+	return fullMessage, nil
+}
+
+
+func (p *marlinPeer) getFrameLength() (lenBuf []byte, n uint64, err error) {
+
+	lenBuf = make([]byte, 8)
+
+	_, err = p.bufConnReader.Read(lenBuf)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	return lenBuf, uint64(binary.BigEndian.Uint64(lenBuf)), nil
+}
+
+func (p *marlinPeer) readMessage() ([]byte, error) {
+	var err error
+	if (p.peerRecvState == lengthWait) {
+		lenBuf := make([]byte, 8)
+		_, err = p.bufConnReader.Read(lenBuf)
+
+		if err != nil {
+			return nil, err
+		}
+
+		p.peerRecvState = messageWait
+		p.bytesPending = uint64(binary.BigEndian.Uint64(lenBuf))
+	}
+
+	if (p.peerRecvState == messageWait) {
+		// real message length
+		frameLength := p.bytesPending
+		frame := make([]byte, frameLength)
+		_, err = io.ReadFull(p.bufConnReader, frame)
+		if err != nil {
+			return nil, err
+		}
+
+		p.peerRecvState = lengthWait
+		p.bytesPending = 8
+		return frame, nil
+	}
+
+	return nil, err
+}
+
+func (p *marlinPeer) recvRoutine() {
+
+//FOR_LOOP:
+	for {
+		fullMessage, err := p.readMessage()
+
+		if err != nil {
+
+		} else {
+			fmt.Printf("frame received %d\n", len(fullMessage));
+
+			chID := fullMessage[0];
+			msgBytes := fullMessage[1:];
+
+			reactor := p.rctByCh[chID]
+			if reactor == nil {
+				// Note that its ok to panic here as it's caught in the conn._recover,
+				// which does onPeerError.
+				panic(fmt.Sprintf("Unknown channel %X", chID))
+			}
+			reactor.Receive(chID, p, msgBytes)
+
+			}
+
+		// if err != nil {
+		// 	// stopServices was invoked and we are shutting down
+		// 	// receiving is excpected to fail since we will close the connection
+		// 	select {
+		// 	case <-c.quitRecvRoutine:
+		// 		break FOR_LOOP
+		// 	default:
+		// 	}
+
+		// 	if c.IsRunning() {
+		// 		if err == io.EOF {
+		// 			c.Logger.Info("Connection is closed @ recvRoutine (likely by the other side)", "conn", c)
+		// 		} else {
+		// 			c.Logger.Error("Connection failed @ recvRoutine (reading byte)", "conn", c, "err", err)
+		// 		}
+		// 		c.stopForError(err)
+		// 	}
+		// 	break FOR_LOOP
+		// }
+
+		// Read more depending on packet type.
+		// switch pkt := packet.(type) {
+		// case PacketMsg:
+		// 	channel, ok := c.channelsIdx[pkt.ChannelID]
+		// 	if !ok || channel == nil {
+		// 		err := fmt.Errorf("unknown channel %X", pkt.ChannelID)
+		// 		c.Logger.Error("Connection failed @ recvRoutine", "conn", c, "err", err)
+		// 		c.stopForError(err)
+		// 		break FOR_LOOP
+		// 	}
+
+		// 	msgBytes, err := channel.recvPacketMsg(pkt)
+		// 	if err != nil {
+		// 		if c.IsRunning() {
+		// 			c.Logger.Error("Connection failed @ recvRoutine", "conn", c, "err", err)
+		// 			c.stopForError(err)
+		// 		}
+		// 		break FOR_LOOP
+		// 	}
+		// 	if msgBytes != nil {
+		// 		c.Logger.Debug("Received bytes", "chID", pkt.ChannelID, "msgBytes", fmt.Sprintf("%X", msgBytes))
+		// 		// NOTE: This means the reactor.Receive runs in the same thread as the p2p recv routine
+		// 		c.onReceive(pkt.ChannelID, msgBytes)
+		// 	}
+		// default:
+		// 	err := fmt.Errorf("unknown message type %v", reflect.TypeOf(packet))
+		// 	c.Logger.Error("Connection failed @ recvRoutine", "conn", c, "err", err)
+		// 	c.stopForError(err)
+		// 	break FOR_LOOP
+		// }
+	}
+}
+
 // TrySend msg bytes to the channel identified by chID byte. Immediately returns
 // false if the send queue is full.
 func (p *marlinPeer) TrySend(chID byte, msgBytes []byte) bool {
-	if !p.IsRunning() {
-		return false
-	} else if !p.hasChannel(chID) {
-		return false
-	}
-
-	msgBytes = length + 1(for channel byte) + msgBytes;
-
-	res = p.trySendBytes(msgBytes)
-	if res {
-		// Wake up sendRoutine if necessary
-		select {
-		case c.send <- struct{}{}:
-		default:
-		}
-
-		labels := []string{
-			"peer_id", string(p.ID()),
-			"chID", fmt.Sprintf("%#x", chID),
-		}
-		p.metrics.PeerSendBytesTotal.With(labels...).Add(float64(len(msgBytes)))
-	}
-
-	return res
+	return false
 }
-
-
-// Queues message to send to this channel.
-// Goroutine-safe
-// Times out (and returns false) after defaultSendTimeout
-func (p *marlinPeer) sendBytes(bytes []byte) bool {
-	select {
-	case p.sendQueue <- bytes:
-		atomic.AddInt32(&p.sendQueueSize, 1)
-		return true
-	case <-time.After(defaultSendTimeout):
-		return false
-	}
-}
-
-// Queues message to send to this channel.
-// Nonblocking, returns true if successful.
-// Goroutine-safe
-func (p *marlinPeer) trySendBytes(bytes []byte) bool {
-	select {
-	case p.sendQueue <- bytes:
-		atomic.AddInt32(&p.sendQueueSize, 1)
-		return true
-	default:
-		return false
-	}
-}
-*/
 
 // Get the data for a given key.
 func (p *marlinPeer) Get(key string) interface{} {

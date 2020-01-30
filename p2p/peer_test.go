@@ -109,6 +109,7 @@ func TestMarlinPeerSend(t *testing.T) {
 
 	assert.True(p.CanSend(testCh))
 	assert.True(p.Send(testCh, []byte("Asylum")))
+	time.Sleep(10*time.Second)
 }
 
 func createMarlinOutboundPeer(
