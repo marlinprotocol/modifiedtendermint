@@ -578,8 +578,6 @@ func (p *marlinPeer) Send(chID byte, msgBytes []byte) bool {
 	chIDLength := 1
 	length := chIDLength + len(msgBytes)
 
-	fmt.Printf("%d\n",length)
-
 	var err error
 
 	// write 8 bit length
@@ -695,7 +693,7 @@ func (p *marlinPeer) recvRoutine() {
 		if err != nil {
 
 		} else {
-			fmt.Printf("frame received %d\n", len(fullMessage));
+			// fmt.Printf("frame received %d\n", len(fullMessage));
 
 			chID := fullMessage[0];
 			msgBytes := fullMessage[1:];
@@ -708,7 +706,7 @@ func (p *marlinPeer) recvRoutine() {
 			}
 			reactor.Receive(chID, p, msgBytes)
 
-			}
+		}
 
 		// if err != nil {
 		// 	// stopServices was invoked and we are shutting down

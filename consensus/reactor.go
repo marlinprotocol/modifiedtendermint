@@ -76,8 +76,6 @@ func (conR *Reactor) OnStart() error {
 
 	conR.subscribeToBroadcastEvents()
 
-	//amolcomment-insert marlin goroutine to gothrough queue and sendmessages
-
 	if !conR.FastSync() {
 		err := conR.conS.Start()
 		if err != nil {
@@ -223,7 +221,7 @@ func (conR *Reactor) Receive(chID byte, src p2p.Peer, msgBytes []byte) {
 
 	// amolcomment-sending to tendermint if received from marlin peer
 	if (src.ID() == "0000000000000000000000000000000000000000") {
-		conR.Logger.Info("Received by marlin", "src", src, "chId", chID, "bytes", msgBytes)
+		conR.Logger.Info("Received by marlin", "src", src, "chId", chID, "msglen", len(msgBytes))
 		conR.Switch.Broadcast(chID, msgBytes)
 		return
 	}
