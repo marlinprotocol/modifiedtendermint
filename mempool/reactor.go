@@ -161,7 +161,18 @@ func (memR *Reactor) Receive(chID byte, src p2p.Peer, msgBytes []byte) {
 		memR.Switch.StopPeerForError(src, err)
 		return
 	}
+
+	// amolcomment-sending to tendermint if received from marlin peer
+	if (src.ID() == "0000000000000000000000000000000000000000") {
+		memR.Logger.Info("Received by marlin", "src", src, "chId", chID, "msglen", len(msgBytes))
+		memR.Switch.Broadcast(chID, msgBytes)
+		return
+	}
+
 	memR.Logger.Debug("Receive", "src", src, "chId", chID, "msg", msg)
+
+	// amolcomment-sending everything on marlin peer
+	memR.Switch.SendOnMarlinPeer(chID,msgBytes)
 
 	switch msg := msg.(type) {
 	case *TxMessage:
