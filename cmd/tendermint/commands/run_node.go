@@ -70,6 +70,8 @@ func AddNodeFlags(cmd *cobra.Command) {
 	cmd.Flags().Bool("p2p.pex", config.P2P.PexReactor, "Enable/disable Peer-Exchange")
 	cmd.Flags().Bool("p2p.seed_mode", config.P2P.SeedMode, "Enable/disable seed mode")
 	cmd.Flags().String("p2p.private_peer_ids", config.P2P.PrivatePeerIDs, "Comma-delimited private peer IDs")
+	//amolcomment
+	cmd.Flags().String("p2p.marlin_peer", config.P2P.MarlinPeer, "ID@host:port marlin peer")
 
 	// consensus flags
 	cmd.Flags().Bool(

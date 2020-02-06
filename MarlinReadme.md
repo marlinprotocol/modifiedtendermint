@@ -28,6 +28,7 @@
 	- turned off via a config change [p2p] pex = false
 
 - TODO: look into failure and retry when tcp bridge not running
+- TODO: failure on update round
 
 #### Marlin Peer
 - implements Peer interface
@@ -38,10 +39,13 @@
 	- actual message (arbitrary bytes)
 
 ### Config
-- [consensus] increase the timeouts
+- [main base config options] fast_sync = false
+- [p2p] pex = false
 - [p2p] persistent_peers = "r_tm_ID@ip:port"
 - [p2p] marlin_peer = "0000000000000000000000000000000000000000@m_bridge_address"
-- [p2p] pex = false
 
 ### Command line
-- \-\- fast_sync=false
+- \-\- fast_sync false
+- \-\- p2p.pex false
+- \-\- p2p.persistent_peers "r_tm_ID@ip:port"
+- \-\- p2p.marlin_peer "0000000000000000000000000000000000000000@m_bridge_address"
