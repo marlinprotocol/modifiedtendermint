@@ -9,7 +9,7 @@ Tendermint blockchain application.
 
 The following diagram provides a superb example:
 
-![](../imgs/cosmos-tendermint-stack-4k.jpg)
+![cosmos-tendermint-stack](../imgs/cosmos-tendermint-stack-4k.jpg)
 
 We distinguish here between two forms of "application". The first is the
 end-user application, like a desktop-based wallet app that a user downloads,
@@ -18,10 +18,9 @@ ABCI application, which is the logic that actually runs on the blockchain.
 Transactions sent by an end-user application are ultimately processed by the ABCI
 application after being committed by the Tendermint consensus.
 
-The end-user application in this diagram is the Cosmos Voyager, at the bottom
-left. Voyager communicates with a REST API exposed by a local Light-Client
-Daemon. The Light-Client Daemon is an application specific program that
-communicates with Tendermint nodes and verifies Tendermint light-client proofs
+The end-user application in this diagram is the [Lunie](https://lunie.io/) app, located at the bottom
+left. Lunie communicates with a REST API exposed by the application.
+The application with Tendermint nodes and verifies Tendermint light-client proofs
 through the Tendermint Core RPC. The Tendermint Core process communicates with
 a local ABCI application, where the user query or transaction is actually
 processed.
@@ -56,6 +55,6 @@ Tendermint.
 See the following for more extensive documentation:
 
 - [Interchain Standard for the Light-Client REST API](https://github.com/cosmos/cosmos-sdk/pull/1028)
-- [Tendermint RPC Docs](https://tendermint.com/rpc/)
+- [Tendermint RPC Docs](https://docs.tendermint.com/master/rpc/)
 - [Tendermint in Production](../tendermint-core/running-in-production.md)
 - [ABCI spec](https://github.com/tendermint/spec/tree/95cf253b6df623066ff7cd4074a94e7a3f147c7a/spec/abci)

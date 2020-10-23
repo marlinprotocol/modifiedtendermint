@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -78,14 +77,17 @@ type Group struct {
 
 // OpenGroup creates a new Group with head at headPath. It returns an error if
 // it fails to open head file.
-func OpenGroup(headPath string, groupOptions ...func(*Group)) (g *Group, err error) {
-	dir := path.Dir(headPath)
+func OpenGroup(headPath string, groupOptions ...func(*Group)) (*Group, error) {
+	dir, err := filepath.Abs(filepath.Dir(headPath))
+	if err != nil {
+		return nil, err
+	}
 	head, err := OpenAutoFile(headPath)
 	if err != nil {
 		return nil, err
 	}
 
-	g = &Group{
+	g := &Group{
 		ID:                 "group:" + head.ID,
 		Head:               head,
 		headBuf:            bufio.NewWriterSize(head, 4096*10),
@@ -107,7 +109,7 @@ func OpenGroup(headPath string, groupOptions ...func(*Group)) (g *Group, err err
 	gInfo := g.readGroupInfo()
 	g.minIndex = gInfo.MinIndex
 	g.maxIndex = gInfo.MaxIndex
-	return
+	return g, nil
 }
 
 // GroupCheckDuration allows you to overwrite default groupCheckDuration.
@@ -143,7 +145,9 @@ func (g *Group) OnStart() error {
 // NOTE: g.Head must be closed separately using Close.
 func (g *Group) OnStop() {
 	g.ticker.Stop()
-	g.FlushAndSync()
+	if err := g.FlushAndSync(); err != nil {
+		g.Logger.Error("Error flushin to disk", "err", err)
+	}
 }
 
 // Wait blocks until all internal goroutines are finished. Supposed to be
@@ -155,7 +159,9 @@ func (g *Group) Wait() {
 
 // Close closes the head file. The group must be stopped by this moment.
 func (g *Group) Close() {
-	g.FlushAndSync()
+	if err := g.FlushAndSync(); err != nil {
+		g.Logger.Error("Error flushin to disk", "err", err)
+	}
 
 	g.mtx.Lock()
 	_ = g.Head.closeFile()

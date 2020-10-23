@@ -1,21 +1,20 @@
 package pex
 
 import (
+	"errors"
 	"fmt"
-	"reflect"
 	"sync"
 	"time"
 
-	"github.com/pkg/errors"
+	"github.com/gogo/protobuf/proto"
 
-	amino "github.com/tendermint/go-amino"
 	"github.com/tendermint/tendermint/libs/cmap"
 	tmmath "github.com/tendermint/tendermint/libs/math"
-	"github.com/tendermint/tendermint/libs/rand"
 	tmrand "github.com/tendermint/tendermint/libs/rand"
 	"github.com/tendermint/tendermint/libs/service"
 	"github.com/tendermint/tendermint/p2p"
 	"github.com/tendermint/tendermint/p2p/conn"
+	tmp2p "github.com/tendermint/tendermint/proto/tendermint/p2p"
 )
 
 type Peer = p2p.Peer
@@ -50,6 +49,9 @@ const (
 	// Especially in the beginning, node should have more trusted peers than
 	// untrusted.
 	biasToSelectNewPeers = 30 // 70 to select good peers
+
+	// if a peer is marked bad, it will be banned for at least this time period
+	defaultBanTime = 24 * time.Hour
 )
 
 type errMaxAttemptsToDial struct {
@@ -137,7 +139,7 @@ func NewReactor(b AddrBook, config *ReactorConfig) *Reactor {
 		lastReceivedRequests: cmap.NewCMap(),
 		crawlPeerInfos:       make(map[p2p.ID]crawlPeerInfo),
 	}
-	r.BaseReactor = *p2p.NewBaseReactor("Reactor", r)
+	r.BaseReactor = *p2p.NewBaseReactor("PEX", r)
 	return r
 }
 
@@ -169,16 +171,19 @@ func (r *Reactor) OnStart() error {
 
 // OnStop implements BaseService
 func (r *Reactor) OnStop() {
-	r.book.Stop()
+	if err := r.book.Stop(); err != nil {
+		r.Logger.Error("Error stopping address book", "err", err)
+	}
 }
 
 // GetChannels implements Reactor
 func (r *Reactor) GetChannels() []*conn.ChannelDescriptor {
 	return []*conn.ChannelDescriptor{
 		{
-			ID:                PexChannel,
-			Priority:          1,
-			SendQueueCapacity: 10,
+			ID:                  PexChannel,
+			Priority:            1,
+			SendQueueCapacity:   10,
+			RecvMessageCapacity: maxMsgSize,
 		},
 	}
 }
@@ -241,7 +246,7 @@ func (r *Reactor) Receive(chID byte, src Peer, msgBytes []byte) {
 	r.Logger.Debug("Received message", "src", src, "chId", chID, "msg", msg)
 
 	switch msg := msg.(type) {
-	case *pexRequestMessage:
+	case *tmp2p.PexRequest:
 
 		// NOTE: this is a prime candidate for amplification attacks,
 		// so it's important we
@@ -272,19 +277,31 @@ func (r *Reactor) Receive(chID byte, src Peer, msgBytes []byte) {
 			// Check we're not receiving requests too frequently.
 			if err := r.receiveRequest(src); err != nil {
 				r.Switch.StopPeerForError(src, err)
+				r.book.MarkBad(src.SocketAddr(), defaultBanTime)
 				return
 			}
 			r.SendAddrs(src, r.book.GetSelection())
 		}
 
-	case *pexAddrsMessage:
+	case *tmp2p.PexAddrs:
 		// If we asked for addresses, add them to the book
-		if err := r.ReceiveAddrs(msg.Addrs, src); err != nil {
+		addrs, err := p2p.NetAddressesFromProto(msg.Addrs)
+		if err != nil {
 			r.Switch.StopPeerForError(src, err)
+			r.book.MarkBad(src.SocketAddr(), defaultBanTime)
 			return
 		}
+		err = r.ReceiveAddrs(addrs, src)
+		if err != nil {
+			r.Switch.StopPeerForError(src, err)
+			if err == ErrUnsolicitedList {
+				r.book.MarkBad(src.SocketAddr(), defaultBanTime)
+			}
+			return
+		}
+
 	default:
-		r.Logger.Error(fmt.Sprintf("Unknown message type %v", reflect.TypeOf(msg)))
+		r.Logger.Error(fmt.Sprintf("Unknown message type %T", msg))
 	}
 }
 
@@ -331,7 +348,7 @@ func (r *Reactor) RequestAddrs(p Peer) {
 	}
 	r.Logger.Debug("Request addrs", "from", p)
 	r.requestsSent.Set(id, struct{}{})
-	p.Send(PexChannel, cdc.MustMarshalBinaryBare(&pexRequestMessage{}))
+	p.Send(PexChannel, mustEncode(&tmp2p.PexRequest{}))
 }
 
 // ReceiveAddrs adds the given addrs to the addrbook if theres an open
@@ -340,7 +357,7 @@ func (r *Reactor) RequestAddrs(p Peer) {
 func (r *Reactor) ReceiveAddrs(addrs []*p2p.NetAddress, src Peer) error {
 	id := string(src.ID())
 	if !r.requestsSent.Has(id) {
-		return errors.New("unsolicited pexAddrsMessage")
+		return ErrUnsolicitedList
 	}
 	r.requestsSent.Delete(id)
 
@@ -390,7 +407,7 @@ func (r *Reactor) ReceiveAddrs(addrs []*p2p.NetAddress, src Peer) error {
 
 // SendAddrs sends addrs to the peer.
 func (r *Reactor) SendAddrs(p Peer, netAddrs []*p2p.NetAddress) {
-	p.Send(PexChannel, cdc.MustMarshalBinaryBare(&pexAddrsMessage{Addrs: netAddrs}))
+	p.Send(PexChannel, mustEncode(&tmp2p.PexAddrs{Addrs: p2p.NetAddressesToProto(netAddrs)}))
 }
 
 // SetEnsurePeersPeriod sets period to ensure peers connected.
@@ -401,7 +418,7 @@ func (r *Reactor) SetEnsurePeersPeriod(d time.Duration) {
 // Ensures that sufficient peers are connected. (continuous)
 func (r *Reactor) ensurePeersRoutine() {
 	var (
-		seed   = rand.NewRand()
+		seed   = tmrand.NewRand()
 		jitter = seed.Int63n(r.ensurePeersPeriod.Nanoseconds())
 	)
 
@@ -494,6 +511,12 @@ func (r *Reactor) ensurePeers() {
 	}
 
 	if r.book.NeedMoreAddrs() {
+		// Check if banned nodes can be reinstated
+		r.book.ReinstateBadPeers()
+	}
+
+	if r.book.NeedMoreAddrs() {
+
 		// 1) Pick a random peer and ask for more.
 		peers := r.Switch.Peers().List()
 		peersCount := len(peers)
@@ -525,18 +548,14 @@ func (r *Reactor) dialAttemptsInfo(addr *p2p.NetAddress) (attempts int, lastDial
 func (r *Reactor) dialPeer(addr *p2p.NetAddress) error {
 	attempts, lastDialed := r.dialAttemptsInfo(addr)
 	if !r.Switch.IsPeerPersistent(addr) && attempts > maxAttemptsToDial {
-		// TODO(melekes): have a blacklist in the addrbook with peers whom we've
-		// failed to connect to. Then we can clean up attemptsToDial, which acts as
-		// a blacklist currently.
-		// https://github.com/tendermint/tendermint/issues/3572
-		r.book.MarkBad(addr)
+		r.book.MarkBad(addr, defaultBanTime)
 		return errMaxAttemptsToDial{}
 	}
 
 	// exponential backoff if it's not our first attempt to dial given address
 	if attempts > 0 {
-		jitterSeconds := time.Duration(tmrand.Float64() * float64(time.Second)) // 1s == (1e9 ns)
-		backoffDuration := jitterSeconds + ((1 << uint(attempts)) * time.Second)
+		jitter := time.Duration(tmrand.Float64() * float64(time.Second)) // 1s == (1e9 ns)
+		backoffDuration := jitter + ((1 << uint(attempts)) * time.Second)
 		backoffDuration = r.maxBackoffDurationForPeer(addr, backoffDuration)
 		sinceLastDialed := time.Since(lastDialed)
 		if sinceLastDialed < backoffDuration {
@@ -558,7 +577,7 @@ func (r *Reactor) dialPeer(addr *p2p.NetAddress) error {
 		default:
 			r.attemptsToDial.Store(addr.DialString(), _attemptsToDial{attempts + 1, time.Now()})
 		}
-		return errors.Wrapf(err, "dialing failed (attempts: %d)", attempts+1)
+		return fmt.Errorf("dialing failed (attempts: %d): %w", attempts+1, err)
 	}
 
 	// cleanup any history
@@ -593,7 +612,7 @@ func (r *Reactor) checkSeeds() (numOnline int, netAddrs []*p2p.NetAddress, err e
 		case p2p.ErrNetAddressLookup:
 			r.Logger.Error("Connecting to seed failed", "err", e)
 		default:
-			return 0, nil, errors.Wrap(e, "seed node configuration has error")
+			return 0, nil, fmt.Errorf("seed node configuration has error: %w", e)
 		}
 	}
 	return numOnline, netAddrs, nil
@@ -741,7 +760,7 @@ func markAddrInBookBasedOnErr(addr *p2p.NetAddress, book AddrBook, err error) {
 	// TODO: detect more "bad peer" scenarios
 	switch err.(type) {
 	case p2p.ErrSwitchAuthenticationFailure:
-		book.MarkBad(addr)
+		book.MarkBad(addr, defaultBanTime)
 	default:
 		book.MarkAttempt(addr)
 	}
@@ -750,41 +769,39 @@ func markAddrInBookBasedOnErr(addr *p2p.NetAddress, book AddrBook, err error) {
 //-----------------------------------------------------------------------------
 // Messages
 
-// Message is a primary type for PEX messages. Underneath, it could contain
-// either pexRequestMessage, or pexAddrsMessage messages.
-type Message interface{}
-
-func RegisterMessages(cdc *amino.Codec) {
-	cdc.RegisterInterface((*Message)(nil), nil)
-	cdc.RegisterConcrete(&pexRequestMessage{}, "tendermint/p2p/PexRequestMessage", nil)
-	cdc.RegisterConcrete(&pexAddrsMessage{}, "tendermint/p2p/PexAddrsMessage", nil)
-}
-
-func decodeMsg(bz []byte) (msg Message, err error) {
-	if len(bz) > maxMsgSize {
-		return msg, fmt.Errorf("msg exceeds max size (%d > %d)", len(bz), maxMsgSize)
+// mustEncode proto encodes a tmp2p.Message
+func mustEncode(pb proto.Message) []byte {
+	msg := tmp2p.Message{}
+	switch pb := pb.(type) {
+	case *tmp2p.PexRequest:
+		msg.Sum = &tmp2p.Message_PexRequest{PexRequest: pb}
+	case *tmp2p.PexAddrs:
+		msg.Sum = &tmp2p.Message_PexAddrs{PexAddrs: pb}
+	default:
+		panic(fmt.Sprintf("Unknown message type %T", pb))
 	}
-	err = cdc.UnmarshalBinaryBare(bz, &msg)
-	return
+
+	bz, err := msg.Marshal()
+	if err != nil {
+		panic(fmt.Errorf("unable to marshal %T: %w", pb, err))
+	}
+	return bz
 }
 
-/*
-A pexRequestMessage requests additional peer addresses.
-*/
-type pexRequestMessage struct {
-}
+func decodeMsg(bz []byte) (proto.Message, error) {
+	pb := &tmp2p.Message{}
 
-func (m *pexRequestMessage) String() string {
-	return "[pexRequest]"
-}
+	err := pb.Unmarshal(bz)
+	if err != nil {
+		return nil, err
+	}
 
-/*
-A message with announced peer addresses.
-*/
-type pexAddrsMessage struct {
-	Addrs []*p2p.NetAddress
-}
-
-func (m *pexAddrsMessage) String() string {
-	return fmt.Sprintf("[pexAddrs %v]", m.Addrs)
+	switch msg := pb.Sum.(type) {
+	case *tmp2p.Message_PexRequest:
+		return msg.PexRequest, nil
+	case *tmp2p.Message_PexAddrs:
+		return msg.PexAddrs, nil
+	default:
+		return nil, fmt.Errorf("unknown message: %T", msg)
+	}
 }

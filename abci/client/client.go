@@ -6,12 +6,15 @@ import (
 
 	"github.com/tendermint/tendermint/abci/types"
 	"github.com/tendermint/tendermint/libs/service"
+	tmsync "github.com/tendermint/tendermint/libs/sync"
 )
 
 const (
 	dialRetryIntervalSeconds = 3
 	echoRetryIntervalSeconds = 1
 )
+
+//go:generate mockery --case underscore --name Client
 
 // Client defines an interface for an ABCI client.
 // All `Async` methods return a `ReqRes` object.
@@ -27,7 +30,6 @@ type Client interface {
 	FlushAsync() *ReqRes
 	EchoAsync(msg string) *ReqRes
 	InfoAsync(types.RequestInfo) *ReqRes
-	SetOptionAsync(types.RequestSetOption) *ReqRes
 	DeliverTxAsync(types.RequestDeliverTx) *ReqRes
 	CheckTxAsync(types.RequestCheckTx) *ReqRes
 	QueryAsync(types.RequestQuery) *ReqRes
@@ -35,11 +37,14 @@ type Client interface {
 	InitChainAsync(types.RequestInitChain) *ReqRes
 	BeginBlockAsync(types.RequestBeginBlock) *ReqRes
 	EndBlockAsync(types.RequestEndBlock) *ReqRes
+	ListSnapshotsAsync(types.RequestListSnapshots) *ReqRes
+	OfferSnapshotAsync(types.RequestOfferSnapshot) *ReqRes
+	LoadSnapshotChunkAsync(types.RequestLoadSnapshotChunk) *ReqRes
+	ApplySnapshotChunkAsync(types.RequestApplySnapshotChunk) *ReqRes
 
 	FlushSync() error
 	EchoSync(msg string) (*types.ResponseEcho, error)
 	InfoSync(types.RequestInfo) (*types.ResponseInfo, error)
-	SetOptionSync(types.RequestSetOption) (*types.ResponseSetOption, error)
 	DeliverTxSync(types.RequestDeliverTx) (*types.ResponseDeliverTx, error)
 	CheckTxSync(types.RequestCheckTx) (*types.ResponseCheckTx, error)
 	QuerySync(types.RequestQuery) (*types.ResponseQuery, error)
@@ -47,6 +52,10 @@ type Client interface {
 	InitChainSync(types.RequestInitChain) (*types.ResponseInitChain, error)
 	BeginBlockSync(types.RequestBeginBlock) (*types.ResponseBeginBlock, error)
 	EndBlockSync(types.RequestEndBlock) (*types.ResponseEndBlock, error)
+	ListSnapshotsSync(types.RequestListSnapshots) (*types.ResponseListSnapshots, error)
+	OfferSnapshotSync(types.RequestOfferSnapshot) (*types.ResponseOfferSnapshot, error)
+	LoadSnapshotChunkSync(types.RequestLoadSnapshotChunk) (*types.ResponseLoadSnapshotChunk, error)
+	ApplySnapshotChunkSync(types.RequestApplySnapshotChunk) (*types.ResponseApplySnapshotChunk, error)
 }
 
 //----------------------------------------
@@ -76,7 +85,7 @@ type ReqRes struct {
 	*sync.WaitGroup
 	*types.Response // Not set atomically, so be sure to use WaitGroup.
 
-	mtx  sync.Mutex
+	mtx  tmsync.Mutex
 	done bool                  // Gets set to true once *after* WaitGroup.Done().
 	cb   func(*types.Response) // A single callback that may be set.
 }

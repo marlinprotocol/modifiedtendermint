@@ -58,6 +58,7 @@ func NewFSM(height int64, toBcR bcReactor) *BcReactorFSM {
 type bReactorEventData struct {
 	peerID         p2p.ID
 	err            error        // for peer error: timeout, slow; for processed block event if error occurred
+	base           int64        // for status response
 	height         int64        // for status response; for processed block event
 	block          *types.Block // for block response
 	stateName      string       // for state timeout events
@@ -73,6 +74,7 @@ const (
 	startFSMEv = iota + 1
 	statusResponseEv
 	blockResponseEv
+	noBlockResponseEv
 	processedBlockEv
 	makeRequestsEv
 	stopFSMEv
@@ -89,10 +91,13 @@ func (msg *bcReactorMessage) String() string {
 	case startFSMEv:
 		dataStr = ""
 	case statusResponseEv:
-		dataStr = fmt.Sprintf("peer=%v height=%v", msg.data.peerID, msg.data.height)
+		dataStr = fmt.Sprintf("peer=%v base=%v height=%v", msg.data.peerID, msg.data.base, msg.data.height)
 	case blockResponseEv:
 		dataStr = fmt.Sprintf("peer=%v block.height=%v length=%v",
 			msg.data.peerID, msg.data.block.Height, msg.data.length)
+	case noBlockResponseEv:
+		dataStr = fmt.Sprintf("peer=%v requested height=%v",
+			msg.data.peerID, msg.data.height)
 	case processedBlockEv:
 		dataStr = fmt.Sprintf("error=%v", msg.data.err)
 	case makeRequestsEv:
@@ -104,7 +109,7 @@ func (msg *bcReactorMessage) String() string {
 	case stateTimeoutEv:
 		dataStr = fmt.Sprintf("state=%v", msg.data.stateName)
 	default:
-		dataStr = fmt.Sprintf("cannot interpret message data")
+		dataStr = "cannot interpret message data"
 	}
 
 	return fmt.Sprintf("%v: %v", msg.event, dataStr)
@@ -118,6 +123,8 @@ func (ev bReactorEvent) String() string {
 		return "statusResponseEv"
 	case blockResponseEv:
 		return "blockResponseEv"
+	case noBlockResponseEv:
+		return "noBlockResponseEv"
 	case processedBlockEv:
 		return "processedBlockEv"
 	case makeRequestsEv:
@@ -182,9 +189,7 @@ func init() {
 			case startFSMEv:
 				// Broadcast Status message. Currently doesn't return non-nil error.
 				fsm.toBcR.sendStatusRequest()
-				//amolcomment-directly going to finished state
-				//return waitForPeer, nil
-				return finished, nil
+				return waitForPeer, nil
 
 			case stopFSMEv:
 				return finished, errNoErrorFinished
@@ -215,7 +220,7 @@ func init() {
 				return finished, errNoTallerPeer
 
 			case statusResponseEv:
-				if err := fsm.pool.UpdatePeer(data.peerID, data.height); err != nil {
+				if err := fsm.pool.UpdatePeer(data.peerID, data.base, data.height); err != nil {
 					if fsm.pool.NumPeers() == 0 {
 						return waitForPeer, err
 					}
@@ -248,7 +253,7 @@ func init() {
 			switch ev {
 
 			case statusResponseEv:
-				err := fsm.pool.UpdatePeer(data.peerID, data.height)
+				err := fsm.pool.UpdatePeer(data.peerID, data.base, data.height)
 				if fsm.pool.NumPeers() == 0 {
 					return waitForPeer, err
 				}
@@ -270,7 +275,10 @@ func init() {
 					return waitForPeer, err
 				}
 				return waitForBlock, err
+			case noBlockResponseEv:
+				fsm.logger.Error("peer does not have requested block", "peer", data.peerID)
 
+				return waitForBlock, nil
 			case processedBlockEv:
 				if data.err != nil {
 					first, second, _ := fsm.pool.FirstTwoBlocksAndPeers()

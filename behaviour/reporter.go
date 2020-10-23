@@ -2,8 +2,8 @@ package behaviour
 
 import (
 	"errors"
-	"sync"
 
+	tmsync "github.com/tendermint/tendermint/libs/sync"
 	"github.com/tendermint/tendermint/p2p"
 )
 
@@ -19,7 +19,7 @@ type SwitchReporter struct {
 }
 
 // NewSwitchReporter return a new SwitchReporter instance which wraps the Switch.
-func NewSwitcReporter(sw *p2p.Switch) *SwitchReporter {
+func NewSwitchReporter(sw *p2p.Switch) *SwitchReporter {
 	return &SwitchReporter{
 		sw: sw,
 	}
@@ -50,7 +50,7 @@ func (spbr *SwitchReporter) Report(behaviour PeerBehaviour) error {
 // interface used in reactor tests to ensure reactors report the correct
 // behaviour in manufactured scenarios.
 type MockReporter struct {
-	mtx sync.RWMutex
+	mtx tmsync.RWMutex
 	pb  map[p2p.ID][]PeerBehaviour
 }
 

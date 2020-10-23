@@ -8,13 +8,15 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	dbm "github.com/tendermint/tm-db"
 
 	"github.com/tendermint/tendermint/abci/example/code"
 	abci "github.com/tendermint/tendermint/abci/types"
 	mempl "github.com/tendermint/tendermint/mempool"
 	sm "github.com/tendermint/tendermint/state"
 	"github.com/tendermint/tendermint/types"
-	dbm "github.com/tendermint/tm-db"
 )
 
 // for testing
@@ -44,13 +46,15 @@ func TestMempoolNoProgressUntilTxsAvailable(t *testing.T) {
 func TestMempoolProgressAfterCreateEmptyBlocksInterval(t *testing.T) {
 	config := ResetConfig("consensus_mempool_txs_available_test")
 	defer os.RemoveAll(config.RootDir)
+
 	config.Consensus.CreateEmptyBlocksInterval = ensureTimeout
 	state, privVals := randGenesisState(1, false, 10)
 	cs := newStateWithConfig(config, state, privVals[0], NewCounterApplication())
+
 	assertMempool(cs.txNotifier).EnableTxsAvailable()
-	height, round := cs.Height, cs.Round
+
 	newBlockCh := subscribe(cs.eventBus, types.EventQueryNewBlock)
-	startTestRound(cs, height, round)
+	startTestRound(cs, cs.Height, cs.Round)
 
 	ensureNewEventOnChannel(newBlockCh)   // first block gets committed
 	ensureNoNewEventOnChannel(newBlockCh) // then we dont make a block ...
@@ -109,8 +113,10 @@ func deliverTxsRange(cs *State, start, end int) {
 func TestMempoolTxConcurrentWithCommit(t *testing.T) {
 	state, privVals := randGenesisState(1, false, 10)
 	blockDB := dbm.NewMemDB()
+	stateStore := sm.NewStore(blockDB)
 	cs := newStateWithConfigAndBlockStore(config, state, privVals[0], NewCounterApplication(), blockDB)
-	sm.SaveState(blockDB, state)
+	err := stateStore.Save(state)
+	require.NoError(t, err)
 	newBlockHeaderCh := subscribe(cs.eventBus, types.EventQueryNewBlockHeader)
 
 	const numTxs int64 = 3000
@@ -132,8 +138,10 @@ func TestMempoolRmBadTx(t *testing.T) {
 	state, privVals := randGenesisState(1, false, 10)
 	app := NewCounterApplication()
 	blockDB := dbm.NewMemDB()
+	stateStore := sm.NewStore(blockDB)
 	cs := newStateWithConfigAndBlockStore(config, state, privVals[0], app, blockDB)
-	sm.SaveState(blockDB, state)
+	err := stateStore.Save(state)
+	require.NoError(t, err)
 
 	// increment the counter by 1
 	txBytes := make([]byte, 8)

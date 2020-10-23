@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -26,43 +25,22 @@ func TestPeerBasic(t *testing.T) {
 	// simulate remote peer
 	rp := &remotePeer{PrivKey: ed25519.GenPrivKey(), Config: cfg}
 	rp.Start()
-	defer rp.Stop()
+	t.Cleanup(rp.Stop)
 
 	p, err := createOutboundPeerAndPerformHandshake(rp.Addr(), cfg, tmconn.DefaultMConnConfig())
 	require.Nil(err)
 
 	err = p.Start()
 	require.Nil(err)
-	defer p.Stop()
-
-	fmt.Sprintf(p.SocketAddr().String());
+	t.Cleanup(func() {
+		if err := p.Stop(); err != nil {
+			t.Error(err)
+		}
+	})
 
 	assert.True(p.IsRunning())
 	assert.True(p.IsOutbound())
 	assert.False(p.IsPersistent())
-	p.persistent = true
-	assert.True(p.IsPersistent())
-	assert.Equal(rp.Addr().DialString(), p.RemoteAddr().String())
-	assert.Equal(rp.ID(), p.ID())
-}
-
-func TestMarlinPeerBasic(t *testing.T) {
-	assert, require := assert.New(t), require.New(t)
-
-	// simulate remote peer
-	rp := &remotePeer{PrivKey: ed25519.GenPrivKey(), Config: cfg}
-	rp.Start()
-	defer rp.Stop()
-
-	p, err := createMarlinOutboundPeer(rp.Addr(), cfg, true, true)
-	require.Nil(err)
-
-	err = p.Start()
-	require.Nil(err)
-	defer p.Stop()
-
-	assert.True(p.IsRunning())
-	assert.True(p.IsOutbound())
 	p.persistent = true
 	assert.True(p.IsPersistent())
 	assert.Equal(rp.Addr().DialString(), p.RemoteAddr().String())
@@ -77,7 +55,7 @@ func TestPeerSend(t *testing.T) {
 	// simulate remote peer
 	rp := &remotePeer{PrivKey: ed25519.GenPrivKey(), Config: config}
 	rp.Start()
-	defer rp.Stop()
+	t.Cleanup(rp.Stop)
 
 	p, err := createOutboundPeerAndPerformHandshake(rp.Addr(), config, tmconn.DefaultMConnConfig())
 	require.Nil(err)
@@ -85,65 +63,14 @@ func TestPeerSend(t *testing.T) {
 	err = p.Start()
 	require.Nil(err)
 
-	defer p.Stop()
+	t.Cleanup(func() {
+		if err := p.Stop(); err != nil {
+			t.Error(err)
+		}
+	})
 
 	assert.True(p.CanSend(testCh))
 	assert.True(p.Send(testCh, []byte("Asylum")))
-}
-
-func TestMarlinPeerSend(t *testing.T) {
-	assert, require := assert.New(t), require.New(t)
-
-	config := cfg
-
-	na, err := NewNetAddressString("0000000000000000000000000000000000000000@0.0.0.0:8000")
-	require.Nil(err)
-
-	p, err := createMarlinOutboundPeer(na, config, true, true)
-	require.Nil(err)
-
-	err = p.Start()
-	require.Nil(err)
-
-	defer p.Stop()
-
-	assert.True(p.CanSend(testCh))
-	assert.True(p.Send(testCh, []byte("Asylum")))
-	time.Sleep(10*time.Second)
-}
-
-func createMarlinOutboundPeer(
-	addr *NetAddress,
-	config *config.P2PConfig,
-	outbound bool,
-	persistent bool,
-) (*marlinPeer, error) {
-
-	chDescs := []*tmconn.ChannelDescriptor{
-		{ID: testCh, Priority: 1},
-	}
-	reactorsByCh := map[byte]Reactor{testCh: NewTestReactor(chDescs, true)}
-
-
-	var pc peerConn
-
-	if config.TestDialFail {
-		return nil, fmt.Errorf("dial err (peerConfig.DialFail == true)")
-	}
-	conn, err := addr.DialTimeout(cfg.DialTimeout)
-	if err != nil {
-		return nil, err
-	}
-
-	// upgrage secret connection to be skipped
-	// pc, err = testPeerConn(conn, config, true, persistent, ourNodePrivKey, addr)
-	pc = newPeerConn(outbound, persistent, conn, addr)
-
-	peerNodeInfo:= testNodeInfo(addr.ID, "host_peer")
-
-	p := newMarlinPeer(pc, peerNodeInfo, reactorsByCh, chDescs, func(p Peer, r interface{}) {})
-	p.SetLogger(log.TestingLogger().With("peer", addr))
-	return p, nil
 }
 
 func createOutboundPeerAndPerformHandshake(
@@ -194,13 +121,13 @@ func testOutboundPeerConn(
 	var pc peerConn
 	conn, err := testDial(addr, config)
 	if err != nil {
-		return pc, errors.Wrap(err, "Error creating peer")
+		return pc, fmt.Errorf("error creating peer: %w", err)
 	}
 
 	pc, err = testPeerConn(conn, config, true, persistent, ourNodePrivKey, addr)
 	if err != nil {
 		if cerr := conn.Close(); cerr != nil {
-			return pc, errors.Wrap(err, cerr.Error())
+			return pc, fmt.Errorf("%v: %w", cerr.Error(), err)
 		}
 		return pc, err
 	}
@@ -208,7 +135,7 @@ func testOutboundPeerConn(
 	// ensure dialed ID matches connection ID
 	if addr.ID != pc.ID() {
 		if cerr := conn.Close(); cerr != nil {
-			return pc, errors.Wrap(err, cerr.Error())
+			return pc, fmt.Errorf("%v: %w", cerr.Error(), err)
 		}
 		return pc, ErrSwitchAuthenticationFailure{addr, pc.ID()}
 	}

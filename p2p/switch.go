@@ -6,8 +6,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pkg/errors"
-
 	"github.com/tendermint/tendermint/config"
 	"github.com/tendermint/tendermint/libs/cmap"
 	"github.com/tendermint/tendermint/libs/rand"
@@ -48,6 +46,7 @@ func MConnConfig(cfg *config.P2PConfig) conn.MConnConfig {
 // to store peer addresses.
 type AddrBook interface {
 	AddAddress(addr *NetAddress, src *NetAddress) error
+	AddPrivateIDs([]string)
 	AddOurAddress(*NetAddress)
 	OurAddress(*NetAddress) bool
 	MarkGood(ID)
@@ -91,8 +90,6 @@ type Switch struct {
 	rng *rand.Rand // seed for randomizing dial times and orders
 
 	metrics *Metrics
-
-	marlinTcpPeer *marlinPeer
 }
 
 // NetAddress returns the address the switch is listening on.
@@ -228,7 +225,7 @@ func (sw *Switch) OnStart() error {
 	for _, reactor := range sw.reactors {
 		err := reactor.Start()
 		if err != nil {
-			return errors.Wrapf(err, "failed to start %v", reactor)
+			return fmt.Errorf("failed to start %v: %w", reactor, err)
 		}
 	}
 
@@ -248,7 +245,9 @@ func (sw *Switch) OnStop() {
 	// Stop reactors
 	sw.Logger.Debug("Switch: Stopping reactors")
 	for _, reactor := range sw.reactors {
-		reactor.Stop()
+		if err := reactor.Stop(); err != nil {
+			sw.Logger.Error("error while stopped reactor", "reactor", reactor, "error", err)
+		}
 	}
 }
 
@@ -262,7 +261,7 @@ func (sw *Switch) OnStop() {
 //
 // NOTE: Broadcast uses goroutines, so order of broadcast may not be preserved.
 func (sw *Switch) Broadcast(chID byte, msgBytes []byte) chan bool {
-	sw.Logger.Info("Broadcast", "channel", chID, "msgBytes", fmt.Sprintf("%X", msgBytes))
+	sw.Logger.Debug("Broadcast", "channel", chID, "msgBytes", fmt.Sprintf("%X", msgBytes))
 
 	peers := sw.peers.List()
 	var wg sync.WaitGroup
@@ -352,7 +351,9 @@ func (sw *Switch) StopPeerGracefully(peer Peer) {
 
 func (sw *Switch) stopAndRemovePeer(peer Peer, reason interface{}) {
 	sw.transport.Cleanup(peer)
-	peer.Stop()
+	if err := peer.Stop(); err != nil {
+		sw.Logger.Error("error while stopping peer", "error", err) // TODO: should return error to be handled accordingly
+	}
 
 	for _, reactor := range sw.reactors {
 		reactor.RemovePeer(peer, reason)
@@ -437,15 +438,6 @@ func (sw *Switch) MarkPeerAsGood(peer Peer) {
 	}
 }
 
-func (sw *Switch) SendOnMarlinPeer(chID byte, msgBytes []byte) bool {
-	if sw.marlinTcpPeer != nil {
-		sw.Logger.Info("Sending to marlin TCP server", "channel", chID, "msgBytes", fmt.Sprintf("%X", msgBytes))
-		return sw.marlinTcpPeer.Send(chID, msgBytes)
-	}
-
-	return false
-}
-
 //---------------------------------------------------------------------
 // Dialing
 
@@ -454,61 +446,8 @@ type privateAddr interface {
 }
 
 func isPrivateAddr(err error) bool {
-	te, ok := errors.Cause(err).(privateAddr)
+	te, ok := err.(privateAddr)
 	return ok && te.PrivateAddr()
-}
-
-func (sw *Switch) DialMarlinPeer(
-	addr *NetAddress,
-	channels []byte,
-) error {
-	outbound := true
-	persistent := true
-
-	var pc peerConn
-
-	sw.Logger.Info("Dialing Marlin TCP peer")
-
-	conn, err := addr.DialTimeout(sw.config.DialTimeout)
-	if err != nil {
-		return err
-	}
-
-	// upgrage secret connection to be skipped
-	// pc, err = testPeerConn(conn, config, true, persistent, ourNodePrivKey, addr)
-	pc = newPeerConn(outbound, persistent, conn, addr)
-
-	// TODO change it
-	peerNodeInfo:= 	DefaultNodeInfo {
-		ProtocolVersion: defaultProtocolVersion,
-		DefaultNodeID:   addr.ID,
-		ListenAddr:      fmt.Sprintf("127.0.0.1:%d", getFreePort()),
-		Network:         "Abcd",
-		Version:         "1.2.3-rc0-deadbeef",
-		Channels:        channels,
-		Moniker:         "marlin_tcp_peer",
-		Other: DefaultNodeInfoOther{
-			TxIndex:    "on",
-			RPCAddress: fmt.Sprintf("127.0.0.1:%d", getFreePort()),
-		},
-	}
-
-	sw.marlinTcpPeer = newMarlinPeer(pc, peerNodeInfo, sw.reactorsByCh, sw.chDescs, func(p Peer, r interface{}) {})
-
-	sw.marlinTcpPeer.SetLogger(sw.Logger.With("peer", sw.marlinTcpPeer.SocketAddr()))
-
-	err = sw.marlinTcpPeer.Start()
-	if err != nil {
-		// Should never happen
-		sw.Logger.Error("Error starting marlin Tcp Peer", "err", err)
-		return err
-	}
-
-	// TODO
-	// add peer? sets logger
-	// adds reactors initializes routines
-
-	return nil
 }
 
 // DialPeersAsync dials a list of peers asynchronously in random order.
@@ -641,15 +580,26 @@ func (sw *Switch) AddUnconditionalPeerIDs(ids []string) error {
 	for i, id := range ids {
 		err := validateID(ID(id))
 		if err != nil {
-			return errors.Wrapf(err, "wrong ID #%d", i)
+			return fmt.Errorf("wrong ID #%d: %w", i, err)
 		}
 		sw.unconditionalPeerIDs[ID(id)] = struct{}{}
 	}
 	return nil
 }
 
-func (sw *Switch) isPeerPersistentFn() func(*NetAddress) bool {
-	return sw.IsPeerPersistent
+func (sw *Switch) AddPrivatePeerIDs(ids []string) error {
+	validIDs := make([]string, 0, len(ids))
+	for i, id := range ids {
+		err := validateID(ID(id))
+		if err != nil {
+			return fmt.Errorf("wrong ID #%d: %w", i, err)
+		}
+		validIDs = append(validIDs, id)
+	}
+
+	sw.addrBook.AddPrivateIDs(validIDs)
+
+	return nil
 }
 
 func (sw *Switch) IsPeerPersistent(na *NetAddress) bool {

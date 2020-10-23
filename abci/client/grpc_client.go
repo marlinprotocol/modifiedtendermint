@@ -3,7 +3,6 @@ package abcicli
 import (
 	"fmt"
 	"net"
-	"sync"
 	"time"
 
 	"golang.org/x/net/context"
@@ -12,6 +11,7 @@ import (
 	"github.com/tendermint/tendermint/abci/types"
 	tmnet "github.com/tendermint/tendermint/libs/net"
 	"github.com/tendermint/tendermint/libs/service"
+	tmsync "github.com/tendermint/tendermint/libs/sync"
 )
 
 var _ Client = (*grpcClient)(nil)
@@ -22,19 +22,27 @@ type grpcClient struct {
 	service.BaseService
 	mustConnect bool
 
-	client types.ABCIApplicationClient
-	conn   *grpc.ClientConn
+	client   types.ABCIApplicationClient
+	conn     *grpc.ClientConn
+	chReqRes chan *ReqRes // dispatches "async" responses to callbacks *in order*, needed by mempool
 
-	mtx   sync.Mutex
+	mtx   tmsync.Mutex
 	addr  string
 	err   error
 	resCb func(*types.Request, *types.Response) // listens to all callbacks
 }
 
-func NewGRPCClient(addr string, mustConnect bool) *grpcClient {
+func NewGRPCClient(addr string, mustConnect bool) Client {
 	cli := &grpcClient{
 		addr:        addr,
 		mustConnect: mustConnect,
+		// Buffering the channel is needed to make calls appear asynchronous,
+		// which is required when the caller makes multiple async calls before
+		// processing callbacks (e.g. due to holding locks). 64 means that a
+		// caller can make up to 64 async calls before a callback must be
+		// processed (otherwise it deadlocks). It also means that we can make 64
+		// gRPC calls while processing a slow callback at the channel head.
+		chReqRes: make(chan *ReqRes, 64),
 	}
 	cli.BaseService = *service.NewBaseService(nil, "grpcClient", cli)
 	return cli
@@ -48,6 +56,34 @@ func (cli *grpcClient) OnStart() error {
 	if err := cli.BaseService.OnStart(); err != nil {
 		return err
 	}
+
+	// This processes asynchronous request/response messages and dispatches
+	// them to callbacks.
+	go func() {
+		// Use a separate function to use defer for mutex unlocks (this handles panics)
+		callCb := func(reqres *ReqRes) {
+			cli.mtx.Lock()
+			defer cli.mtx.Unlock()
+
+			// Notify client listener if set
+			if cli.resCb != nil {
+				cli.resCb(reqres.Request, reqres.Response)
+			}
+
+			// Notify reqRes listener if set
+			if cb := reqres.GetCallback(); cb != nil {
+				cb(reqres.Response)
+			}
+		}
+		for reqres := range cli.chReqRes {
+			if reqres != nil {
+				callCb(reqres)
+			} else {
+				cli.Logger.Error("Received nil reqres")
+			}
+		}
+	}()
+
 RETRY_LOOP:
 	for {
 		conn, err := grpc.Dial(cli.addr, grpc.WithInsecure(), grpc.WithContextDialer(dialerFunc))
@@ -85,6 +121,7 @@ func (cli *grpcClient) OnStop() {
 	if cli.conn != nil {
 		cli.conn.Close()
 	}
+	close(cli.chReqRes)
 }
 
 func (cli *grpcClient) StopForError(err error) {
@@ -99,7 +136,9 @@ func (cli *grpcClient) StopForError(err error) {
 	cli.mtx.Unlock()
 
 	cli.Logger.Error(fmt.Sprintf("Stopping abci.grpcClient for error: %v", err.Error()))
-	cli.Stop()
+	if err := cli.Stop(); err != nil {
+		cli.Logger.Error("Error stopping abci.grpcClient", "err", err)
+	}
 }
 
 func (cli *grpcClient) Error() error {
@@ -149,15 +188,6 @@ func (cli *grpcClient) InfoAsync(params types.RequestInfo) *ReqRes {
 		cli.StopForError(err)
 	}
 	return cli.finishAsyncCall(req, &types.Response{Value: &types.Response_Info{Info: res}})
-}
-
-func (cli *grpcClient) SetOptionAsync(params types.RequestSetOption) *ReqRes {
-	req := types.ToRequestSetOption(params)
-	res, err := cli.client.SetOption(context.Background(), req.GetSetOption(), grpc.WaitForReady(true))
-	if err != nil {
-		cli.StopForError(err)
-	}
-	return cli.finishAsyncCall(req, &types.Response{Value: &types.Response_SetOption{SetOption: res}})
 }
 
 func (cli *grpcClient) DeliverTxAsync(params types.RequestDeliverTx) *ReqRes {
@@ -223,28 +253,48 @@ func (cli *grpcClient) EndBlockAsync(params types.RequestEndBlock) *ReqRes {
 	return cli.finishAsyncCall(req, &types.Response{Value: &types.Response_EndBlock{EndBlock: res}})
 }
 
+func (cli *grpcClient) ListSnapshotsAsync(params types.RequestListSnapshots) *ReqRes {
+	req := types.ToRequestListSnapshots(params)
+	res, err := cli.client.ListSnapshots(context.Background(), req.GetListSnapshots(), grpc.WaitForReady(true))
+	if err != nil {
+		cli.StopForError(err)
+	}
+	return cli.finishAsyncCall(req, &types.Response{Value: &types.Response_ListSnapshots{ListSnapshots: res}})
+}
+
+func (cli *grpcClient) OfferSnapshotAsync(params types.RequestOfferSnapshot) *ReqRes {
+	req := types.ToRequestOfferSnapshot(params)
+	res, err := cli.client.OfferSnapshot(context.Background(), req.GetOfferSnapshot(), grpc.WaitForReady(true))
+	if err != nil {
+		cli.StopForError(err)
+	}
+	return cli.finishAsyncCall(req, &types.Response{Value: &types.Response_OfferSnapshot{OfferSnapshot: res}})
+}
+
+func (cli *grpcClient) LoadSnapshotChunkAsync(params types.RequestLoadSnapshotChunk) *ReqRes {
+	req := types.ToRequestLoadSnapshotChunk(params)
+	res, err := cli.client.LoadSnapshotChunk(context.Background(), req.GetLoadSnapshotChunk(), grpc.WaitForReady(true))
+	if err != nil {
+		cli.StopForError(err)
+	}
+	return cli.finishAsyncCall(req, &types.Response{Value: &types.Response_LoadSnapshotChunk{LoadSnapshotChunk: res}})
+}
+
+func (cli *grpcClient) ApplySnapshotChunkAsync(params types.RequestApplySnapshotChunk) *ReqRes {
+	req := types.ToRequestApplySnapshotChunk(params)
+	res, err := cli.client.ApplySnapshotChunk(context.Background(), req.GetApplySnapshotChunk(), grpc.WaitForReady(true))
+	if err != nil {
+		cli.StopForError(err)
+	}
+	return cli.finishAsyncCall(req, &types.Response{Value: &types.Response_ApplySnapshotChunk{ApplySnapshotChunk: res}})
+}
+
 func (cli *grpcClient) finishAsyncCall(req *types.Request, res *types.Response) *ReqRes {
 	reqres := NewReqRes(req)
-	reqres.Response = res // Set response
-	reqres.Done()         // Release waiters
-	reqres.SetDone()      // so reqRes.SetCallback will run the callback
-
-	// goroutine for callbacks
-	go func() {
-		cli.mtx.Lock()
-		defer cli.mtx.Unlock()
-
-		// Notify client listener if set
-		if cli.resCb != nil {
-			cli.resCb(reqres.Request, res)
-		}
-
-		// Notify reqRes listener if set
-		if cb := reqres.GetCallback(); cb != nil {
-			cb(res)
-		}
-	}()
-
+	reqres.Response = res  // Set response
+	reqres.Done()          // Release waiters
+	reqres.SetDone()       // so reqRes.SetCallback will run the callback
+	cli.chReqRes <- reqres // use channel for async responses, since they must be ordered
 	return reqres
 }
 
@@ -263,11 +313,6 @@ func (cli *grpcClient) EchoSync(msg string) (*types.ResponseEcho, error) {
 func (cli *grpcClient) InfoSync(req types.RequestInfo) (*types.ResponseInfo, error) {
 	reqres := cli.InfoAsync(req)
 	return reqres.Response.GetInfo(), cli.Error()
-}
-
-func (cli *grpcClient) SetOptionSync(req types.RequestSetOption) (*types.ResponseSetOption, error) {
-	reqres := cli.SetOptionAsync(req)
-	return reqres.Response.GetSetOption(), cli.Error()
 }
 
 func (cli *grpcClient) DeliverTxSync(params types.RequestDeliverTx) (*types.ResponseDeliverTx, error) {
@@ -303,4 +348,26 @@ func (cli *grpcClient) BeginBlockSync(params types.RequestBeginBlock) (*types.Re
 func (cli *grpcClient) EndBlockSync(params types.RequestEndBlock) (*types.ResponseEndBlock, error) {
 	reqres := cli.EndBlockAsync(params)
 	return reqres.Response.GetEndBlock(), cli.Error()
+}
+
+func (cli *grpcClient) ListSnapshotsSync(params types.RequestListSnapshots) (*types.ResponseListSnapshots, error) {
+	reqres := cli.ListSnapshotsAsync(params)
+	return reqres.Response.GetListSnapshots(), cli.Error()
+}
+
+func (cli *grpcClient) OfferSnapshotSync(params types.RequestOfferSnapshot) (*types.ResponseOfferSnapshot, error) {
+	reqres := cli.OfferSnapshotAsync(params)
+	return reqres.Response.GetOfferSnapshot(), cli.Error()
+}
+
+func (cli *grpcClient) LoadSnapshotChunkSync(
+	params types.RequestLoadSnapshotChunk) (*types.ResponseLoadSnapshotChunk, error) {
+	reqres := cli.LoadSnapshotChunkAsync(params)
+	return reqres.Response.GetLoadSnapshotChunk(), cli.Error()
+}
+
+func (cli *grpcClient) ApplySnapshotChunkSync(
+	params types.RequestApplySnapshotChunk) (*types.ResponseApplySnapshotChunk, error) {
+	reqres := cli.ApplySnapshotChunkAsync(params)
+	return reqres.Response.GetApplySnapshotChunk(), cli.Error()
 }

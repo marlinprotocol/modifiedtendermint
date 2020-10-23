@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+
 	"github.com/tendermint/tendermint/libs/log"
 	tmmath "github.com/tendermint/tendermint/libs/math"
 	tmrand "github.com/tendermint/tendermint/libs/rand"
@@ -821,7 +822,7 @@ const (
 	maxRequestsPerPeerTest      = 20
 	maxTotalPendingRequestsTest = 600
 	maxNumPeersTest             = 1000
-	maxNumBlocksInChainTest     = 10000 //should be smaller than 9999999
+	maxNumBlocksInChainTest     = 10000 // should be smaller than 9999999
 )
 
 func makeCorrectTransitionSequenceWithRandomParameters() testFields {
