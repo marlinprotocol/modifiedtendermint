@@ -1,0 +1,982 @@
+diff --git a/MarlinReadme.md b/MarlinReadme.md
+new file mode 100644
+index 00000000..745c6709
+--- /dev/null
++++ b/MarlinReadme.md
+@@ -0,0 +1,51 @@
++# Marlin <> TM
++---
++
++## Participants
++- r_tm - Real TM node
++- m_tm - Modified TM node
++- m_sdk - MarlinMulticastSDK
++- m_bridge - TCP Bridge between modified TM node and MarlinMulticastSDK
++
++## Modified TM node changes
++
++### Code
++
++#### Reactors
++- Blockchain reactor
++	- fast-sync turned off to prevent the m_tm node from trying to sync up with mainchain and move straight forward to consensus mode
++
++- Consensus reactor
++	- reflecting back r_tm node's newroundstep message
++ 	- receive from m_bridge -> send to r_tm node
++	- receive from r_tm node -> send to m_brige via marlinPeer
++	- TODO: consensus reactor early return from receive (after reflecting the NRS message
++- Mempool reactor
++	- receive from m_bridge -> send to r_tm node
++	- receive from r_tm node -> send to m_brige via marlinPeer
++
++- PEX reactor
++	- turned off via a config change [p2p] pex = false
++
++- TODO: look into failure and retry when tcp bridge not running
++- TODO: failure on update round
++
++#### Marlin Peer
++- implements Peer interface
++- connects m_tm to m_bridge using a tcp connection
++- lpf message format
++	- 8 byte, message length = chID length (1 byte) + actual_message_length
++	- 1 byte, chID
++	- actual message (arbitrary bytes)
++
++### Config
++- [main base config options] fast_sync = false
++- [p2p] pex = false
++- [p2p] persistent_peers = "r_tm_ID@ip:port"
++- [p2p] marlin_peer = "0000000000000000000000000000000000000000@m_bridge_address"
++
++### Command line
++- \-\- fast_sync false
++- \-\- p2p.pex false
++- \-\- p2p.persistent_peers "r_tm_ID@ip:port"
++- \-\- p2p.marlin_peer "0000000000000000000000000000000000000000@m_bridge_address"
+diff --git a/blockchain/v1/reactor_fsm.go b/blockchain/v1/reactor_fsm.go
+index 8d3a363a..d708beca 100644
+--- a/blockchain/v1/reactor_fsm.go
++++ b/blockchain/v1/reactor_fsm.go
+@@ -182,7 +182,9 @@ func init() {
+ 			case startFSMEv:
+ 				// Broadcast Status message. Currently doesn't return non-nil error.
+ 				fsm.toBcR.sendStatusRequest()
+-				return waitForPeer, nil
++				//amolcomment-directly going to finished state
++				//return waitForPeer, nil
++				return finished, nil
+ 
+ 			case stopFSMEv:
+ 				return finished, errNoErrorFinished
+diff --git a/cmd/tendermint/commands/run_node.go b/cmd/tendermint/commands/run_node.go
+index 6d9f575d..111466db 100644
+--- a/cmd/tendermint/commands/run_node.go
++++ b/cmd/tendermint/commands/run_node.go
+@@ -70,6 +70,8 @@ func AddNodeFlags(cmd *cobra.Command) {
+ 	cmd.Flags().Bool("p2p.pex", config.P2P.PexReactor, "Enable/disable Peer-Exchange")
+ 	cmd.Flags().Bool("p2p.seed_mode", config.P2P.SeedMode, "Enable/disable seed mode")
+ 	cmd.Flags().String("p2p.private_peer_ids", config.P2P.PrivatePeerIDs, "Comma-delimited private peer IDs")
++	//amolcomment
++	cmd.Flags().String("p2p.marlin_peer", config.P2P.MarlinPeer, "ID@host:port marlin peer")
+ 
+ 	// consensus flags
+ 	cmd.Flags().Bool(
+diff --git a/config/config.go b/config/config.go
+index 38ea4ba0..3ad7fbf0 100644
+--- a/config/config.go
++++ b/config/config.go
+@@ -493,6 +493,9 @@ type P2PConfig struct { //nolint: maligned
+ 	// Comma separated list of nodes to keep persistent connections to
+ 	PersistentPeers string `mapstructure:"persistent_peers"`
+ 
++	//amolcomment
++	MarlinPeer string `mapstructure:"marlin_peer"`
++
+ 	// UPNP port forwarding
+ 	UPNP bool `mapstructure:"upnp"`
+ 
+diff --git a/config/toml.go b/config/toml.go
+index 609f1487..db7d7239 100644
+--- a/config/toml.go
++++ b/config/toml.go
+@@ -240,6 +240,9 @@ seeds = "{{ .P2P.Seeds }}"
+ # Comma separated list of nodes to keep persistent connections to
+ persistent_peers = "{{ .P2P.PersistentPeers }}"
+ 
++# amolcomment - Marlin Peer
++marlin_peer = "{{ .P2P.MarlinPeer }}"
++
+ # UPNP port forwarding
+ upnp = {{ .P2P.UPNP }}
+ 
+diff --git a/consensus/reactor.go b/consensus/reactor.go
+index 40868ff9..676a3e64 100644
+--- a/consensus/reactor.go
++++ b/consensus/reactor.go
+@@ -180,6 +180,8 @@ func (conR *Reactor) AddPeer(peer p2p.Peer) {
+ 		panic(fmt.Sprintf("peer %v has no state", peer))
+ 	}
+ 	// Begin routines for this peer.
++
++	// amolcomment switching off gossips
+ 	go conR.gossipDataRoutine(peer, peerState)
+ 	go conR.gossipVotesRoutine(peer, peerState)
+ 	go conR.queryMaj23Routine(peer, peerState)
+@@ -187,7 +189,8 @@ func (conR *Reactor) AddPeer(peer p2p.Peer) {
+ 	// Send our state to peer.
+ 	// If we're fast_syncing, broadcast a RoundStepMessage later upon SwitchToConsensus().
+ 	if !conR.FastSync() {
+-		conR.sendNewRoundStepMessage(peer)
++		// amolcomment: To fool the peer by not telling actual state and hence the height
++		// conR.sendNewRoundStepMessage(peer)
+ 	}
+ }
+ 
+@@ -216,6 +219,16 @@ func (conR *Reactor) Receive(chID byte, src p2p.Peer, msgBytes []byte) {
+ 		return
+ 	}
+ 
++	// amolcomment-sending to tendermint if received from marlin peer
++	if (src.ID() == "0000000000000000000000000000000000000000") {
++		conR.Logger.Info("Received by marlin", "src", src, "chId", chID, "msglen", len(msgBytes))
++		conR.Switch.Broadcast(chID, msgBytes)
++		return
++	}
++
++	// amolcomment-sending everything on marlin peer
++	conR.Switch.SendOnMarlinPeer(chID,msgBytes)
++
+ 	msg, err := decodeMsg(msgBytes)
+ 	if err != nil {
+ 		conR.Logger.Error("Error decoding message", "src", src, "chId", chID, "msg", msg, "err", err, "bytes", msgBytes)
+@@ -242,6 +255,11 @@ func (conR *Reactor) Receive(chID byte, src p2p.Peer, msgBytes []byte) {
+ 		switch msg := msg.(type) {
+ 		case *NewRoundStepMessage:
+ 			ps.ApplyNewRoundStepMessage(msg)
++			// amolcomment: Reflecting back the peers own height
++			if conR.conS.Height <= msg.Height {
++				src.Send(StateChannel, cdc.MustMarshalBinaryBare(msg))
++			}
++			// amolcomment: update height, r, s here?
+ 		case *NewValidBlockMessage:
+ 			ps.ApplyNewValidBlockMessage(msg)
+ 		case *HasVoteMessage:
+@@ -402,8 +420,9 @@ func (conR *Reactor) unsubscribeFromBroadcastEvents() {
+ }
+ 
+ func (conR *Reactor) broadcastNewRoundStepMessage(rs *cstypes.RoundState) {
+-	nrsMsg := makeRoundStepMessage(rs)
+-	conR.Switch.Broadcast(StateChannel, cdc.MustMarshalBinaryBare(nrsMsg))
++	// nrsMsg := makeRoundStepMessage(rs)
++	//amolcomment-turning off this broadcast
++	// conR.Switch.Broadcast(StateChannel, cdc.MustMarshalBinaryBare(nrsMsg))
+ }
+ 
+ func (conR *Reactor) broadcastNewValidBlockMessage(rs *cstypes.RoundState) {
+diff --git a/consensus/state.go b/consensus/state.go
+index b5fb1c0d..dee5fb59 100644
+--- a/consensus/state.go
++++ b/consensus/state.go
+@@ -168,7 +168,8 @@ func NewState(
+ 	// set function defaults (may be overwritten before calling Start)
+ 	cs.decideProposal = cs.defaultDecideProposal
+ 	cs.doPrevote = cs.defaultDoPrevote
+-	cs.setProposal = cs.defaultSetProposal
++	// amolcomment
++	cs.setProposal = cs.defaultMarlinSetProposal
+ 
+ 	cs.updateToState(state)
+ 
+@@ -1566,12 +1567,54 @@ func (cs *State) defaultSetProposal(proposal *types.Proposal) error {
+ 	return nil
+ }
+ 
++func (cs *State) defaultMarlinSetProposal(proposal *types.Proposal) error {
++	// Already have one
++	// TODO: possibly catch double proposals
++
++	cs.Logger.Info("marlin Received proposal", "proposal", proposal)
++
++	if (proposal.Height == cs.Height && proposal.Round == cs.Round) {
++		return nil
++	}
++
++	// amolcomment updated height and round
++	cs.updateHeight(proposal.Height)
++	cs.updateRoundStep(proposal.Round, cstypes.RoundStepNewHeight)
++	cs.ProposalBlockParts = nil
++
++	// Verify POLRound, which must be -1 or in range [0, proposal.Round).
++	if proposal.POLRound < -1 ||
++		(proposal.POLRound >= 0 && proposal.POLRound >= proposal.Round) {
++		cs.Logger.Info("Invalid proposal", "proposal", proposal)
++		return ErrInvalidProposalPOLRound
++	}
++
++	// Verify signature
++	if !cs.Validators.GetProposer().PubKey.VerifyBytes(proposal.SignBytes(cs.state.ChainID), proposal.Signature) {
++		return ErrInvalidProposalSignature
++	}
++
++	cs.Proposal = proposal
++	// We don't update cs.ProposalBlockParts if it is already set.
++	// This happens if we're already in cstypes.RoundStepCommit or if there is a valid block in the current round.
++	// TODO: We can check if Proposal is for a different block as this is a sign of misbehavior!
++	if cs.ProposalBlockParts == nil {
++		cs.ProposalBlockParts = types.NewPartSetFromHeader(proposal.BlockID.PartsHeader)
++	}
++	cs.Logger.Info("Received proposal", "proposal", proposal)
++	return nil
++}
++
+ // NOTE: block is not necessarily valid.
+ // Asynchronously triggers either enterPrevote (before we timeout of propose) or tryFinalizeCommit,
+ // once we have the full block.
+ func (cs *State) addProposalBlockPart(msg *BlockPartMessage, peerID p2p.ID) (added bool, err error) {
+ 	height, round, part := msg.Height, msg.Round, msg.Part
+ 
++	// amolcomment
++	cs.Logger.Info("Receiving a block part",
++			"height", height, "round", round, "index", part.Index, "peer", peerID)
++
+ 	// Blocks might be reused, so round mismatch is OK
+ 	if cs.Height != height {
+ 		cs.Logger.Debug("Received block part from wrong height", "height", height, "round", round)
+@@ -1587,11 +1630,16 @@ func (cs *State) addProposalBlockPart(msg *BlockPartMessage, peerID p2p.ID) (add
+ 		return false, nil
+ 	}
+ 
++	cs.Logger.Info("Adding a block part",
++			"height", height, "round", round, "index", part.Index, "peer", peerID)
++
+ 	added, err = cs.ProposalBlockParts.AddPart(part)
+ 	if err != nil {
+ 		return added, err
+ 	}
++
+ 	if added && cs.ProposalBlockParts.IsComplete() {
++		cs.Logger.Info("complete proposal block parts")
+ 		// Added and completed!
+ 		_, err = cdc.UnmarshalBinaryLengthPrefixedReader(
+ 			cs.ProposalBlockParts.GetReader(),
+diff --git a/mempool/reactor.go b/mempool/reactor.go
+index 161fc721..e51b4a8c 100644
+--- a/mempool/reactor.go
++++ b/mempool/reactor.go
+@@ -161,8 +161,19 @@ func (memR *Reactor) Receive(chID byte, src p2p.Peer, msgBytes []byte) {
+ 		memR.Switch.StopPeerForError(src, err)
+ 		return
+ 	}
++
++	// amolcomment-sending to tendermint if received from marlin peer
++	if (src.ID() == "0000000000000000000000000000000000000000") {
++		memR.Logger.Info("Received by marlin", "src", src, "chId", chID, "msglen", len(msgBytes))
++		memR.Switch.Broadcast(chID, msgBytes)
++		return
++	}
++
+ 	memR.Logger.Debug("Receive", "src", src, "chId", chID, "msg", msg)
+ 
++	// amolcomment-sending everything on marlin peer
++	memR.Switch.SendOnMarlinPeer(chID,msgBytes)
++
+ 	switch msg := msg.(type) {
+ 	case *TxMessage:
+ 		txInfo := TxInfo{SenderID: memR.ids.GetForPeer(src)}
+diff --git a/node/node.go b/node/node.go
+index 7decbf19..760a1060 100644
+--- a/node/node.go
++++ b/node/node.go
+@@ -799,6 +799,46 @@ func (n *Node) OnStart() error {
+ 		return errors.Wrap(err, "could not dial peers from persistent_peers field")
+ 	}
+ 
++	// TODO
++	// nodeInfo := p2p.DefaultNodeInfo{
++	// 	ProtocolVersion: p2p.NewProtocolVersion(
++	// 		version.P2PProtocol, // global
++	// 		state.Version.Consensus.Block,
++	// 		state.Version.Consensus.App,
++	// 	),
++	// 	DefaultNodeID: nodeKey.ID(),
++	// 	Network:       n.genDoc.ChainID,
++	// 	Version:       n.version.TMCoreSemVer,
++	// 	Channels: []byte{
++	// 		bcv1.BlockchainChannel,
++	// 		cs.StateChannel, cs.DataChannel, cs.VoteChannel, cs.VoteSetBitsChannel,
++	// 		mempl.MempoolChannel,
++	// 		evidence.EvidenceChannel,
++	// 	},
++	// 	Moniker: n.config.Moniker,
++	// 	Other: p2p.DefaultNodeInfoOther{
++	// 		TxIndex:    "on",
++	// 		RPCAddress: fmt.Sprintf("127.0.0.1:%d", getFreePort()),
++	// 	},
++	// }
++
++	na, err := p2p.NewNetAddressString(n.config.P2P.MarlinPeer)
++	if err != nil {
++		return err
++	}
++
++	err = n.sw.DialMarlinPeer(na, []byte{
++			bcv1.BlockchainChannel,
++			cs.StateChannel, cs.DataChannel, cs.VoteChannel, cs.VoteSetBitsChannel,
++			mempl.MempoolChannel,
++			evidence.EvidenceChannel,
++		},
++	)
++
++	if err != nil {
++		return err
++	}
++
+ 	return nil
+ }
+ 
+diff --git a/p2p/peer.go b/p2p/peer.go
+index 7a6d6f86..1370df15 100644
+--- a/p2p/peer.go
++++ b/p2p/peer.go
+@@ -4,12 +4,16 @@ import (
+ 	"fmt"
+ 	"net"
+ 	"time"
++	"io"
+ 
+ 	"github.com/tendermint/tendermint/libs/cmap"
+ 	"github.com/tendermint/tendermint/libs/log"
+ 	"github.com/tendermint/tendermint/libs/service"
+ 
+ 	tmconn "github.com/tendermint/tendermint/p2p/conn"
++
++	"bufio"
++	"encoding/binary"
+ )
+ 
+ const metricsTickerDuration = 10 * time.Second
+@@ -398,3 +402,419 @@ func createMConnection(
+ 		config,
+ 	)
+ }
++
++// Blockchain Reactor Events (the input to the state machine)
++type recvState uint
++
++const (
++	// message type events
++	lengthWait = iota + 1
++	messageWait
++)
++
++// marlinPeer implements Peer.
++type marlinPeer struct {
++	service.BaseService
++
++	// raw peerConn and the multiplex connection
++	peerConn
++
++	// peer's node info and the channel it knows about
++	// channels = nodeInfo.Channels
++	// cached to avoid copying nodeInfo in hasChannel
++	nodeInfo NodeInfo
++	channels []byte
++
++	// User data
++	Data *cmap.CMap
++
++	metrics       *Metrics
++	metricsTicker *time.Ticker
++
++	bufConnReader *bufio.Reader
++	bufConnWriter *bufio.Writer
++
++	peerRecvState uint
++	bytesPending  uint64
++
++	rctByCh map[byte]Reactor
++
++	// send          chan struct{}
++	// sendQueue     chan []byte
++	// sendQueueSize int32 // atomic.
++
++	// recving       []byte
++	// sending       []byte
++}
++
++type MarlinPeerOption func(*marlinPeer)
++
++func newMarlinPeer(
++	pc peerConn,
++	nodeInfo NodeInfo,
++	reactorsByCh map[byte]Reactor,
++	chDescs []*tmconn.ChannelDescriptor,
++	onPeerError func(Peer, interface{}),
++	options ...MarlinPeerOption,
++) *marlinPeer {
++	p := &marlinPeer{
++		peerConn:      pc,
++		nodeInfo:      nodeInfo,
++		channels:      nodeInfo.(DefaultNodeInfo).Channels, // TODO
++		Data:          cmap.NewCMap(),
++		metricsTicker: time.NewTicker(metricsTickerDuration),
++		metrics:       NopMetrics(),
++		bufConnReader: bufio.NewReaderSize(pc.conn, 1024),
++		bufConnWriter: bufio.NewWriterSize(pc.conn, 65536),
++		peerRecvState: lengthWait,
++		bytesPending:  8,
++		rctByCh:       make(map[byte]Reactor),
++	}
++
++	for k, v := range reactorsByCh {
++		p.rctByCh[k] = v
++	}
++
++
++	p.BaseService = *service.NewBaseService(nil, "MarlinPeer", p)
++	for _, option := range options {
++		option(p)
++	}
++
++	return p
++}
++
++// String representation.
++func (p *marlinPeer) String() string {
++	if p.outbound {
++		return fmt.Sprintf("Peer{%v out}", p.ID())
++	}
++
++	return fmt.Sprintf("Peer{%v in}", p.ID())
++}
++
++//---------------------------------------------------
++// Implements service.Service
++
++// SetLogger implements BaseService.
++func (p *marlinPeer) SetLogger(l log.Logger) {
++	p.Logger = l
++}
++
++// OnStart implements BaseService.
++func (p *marlinPeer) OnStart() error {
++	if err := p.BaseService.OnStart(); err != nil {
++		return err
++	}
++
++	// go p.sendRoutine()
++	go p.recvRoutine()
++	return nil
++}
++
++// FlushStop mimics OnStop but additionally ensures that all successful
++// .Send() calls will get flushed before closing the connection.
++// NOTE: it is not safe to call this method more than once.
++func (p *marlinPeer) FlushStop() {
++	p.BaseService.OnStop()
++	p.FlushStop() // stop everything and close the conn
++}
++
++// OnStop implements BaseService.
++func (p *marlinPeer) OnStop() {
++	p.BaseService.OnStop()
++}
++
++//---------------------------------------------------
++// Implements Peer
++
++// ID returns the peer's ID - the hex encoded hash of its pubkey.
++func (p *marlinPeer) ID() ID {
++	return p.nodeInfo.ID()
++}
++
++// IsOutbound returns true if the connection is outbound, false otherwise.
++func (p *marlinPeer) IsOutbound() bool {
++	return p.peerConn.outbound
++}
++
++// IsPersistent returns true if the peer is persitent, false otherwise.
++func (p *marlinPeer) IsPersistent() bool {
++	return p.peerConn.persistent
++}
++
++// NodeInfo returns a copy of the peer's NodeInfo.
++func (p *marlinPeer) NodeInfo() NodeInfo {
++	return p.nodeInfo
++}
++
++// SocketAddr returns the address of the socket.
++// For outbound peers, it's the address dialed (after DNS resolution).
++// For inbound peers, it's the address returned by the underlying connection
++// (not what's reported in the peer's NodeInfo).
++func (p *marlinPeer) SocketAddr() *NetAddress {
++	return p.peerConn.socketAddr
++}
++
++// Status returns the peer's ConnectionStatus.
++func (p *marlinPeer) Status() tmconn.ConnectionStatus {
++	var status tmconn.ConnectionStatus
++	return status
++}
++
++// Send msg bytes to the channel identified by chID byte. Returns false if the
++// send queue is full after timeout, specified by MConnection.
++func (p *marlinPeer) Send(chID byte, msgBytes []byte) bool {
++	if !p.IsRunning() {
++		// see Switch#Broadcast, where we fetch the list of peers and loop over
++		// them - while we're looping, one peer may be removed and stopped.
++		p.Logger.Debug("marlin peer not running")
++		return false
++	} else if !p.hasChannel(chID) {
++		p.Logger.Debug("marlin peer does not have channel")
++		return false
++	}
++
++	chIDLength := 1
++	length := chIDLength + len(msgBytes)
++
++	var err error
++
++	// write 8 bit length
++	buf := make([]byte, 8)
++	binary.BigEndian.PutUint64(buf, uint64(length))
++	_, err = p.bufConnWriter.Write(buf)
++
++	if err != nil {
++		p.Logger.Debug("Failed to write prefixed length")
++		return false
++	}
++
++	// write channel id
++	err = p.bufConnWriter.WriteByte(byte(chID))
++	if err != nil {
++		p.Logger.Debug("Failed to write channel")
++		return false
++	}
++
++	// write the message buffer
++	_, err = p.bufConnWriter.Write(msgBytes)
++	p.bufConnWriter.Flush()
++
++	if (err != nil) {
++		p.Logger.Debug("Failed to write prefixed length")
++		return false
++	}
++
++	return true
++}
++
++func (p *marlinPeer) ReadFrame() ([]byte, error) {
++	var err error
++
++	lenBuf, frameLength, err := p.getFrameLength()
++	if err != nil {
++		return nil, err
++	}
++
++	chIDLength := 1
++	chID := make([]byte, chIDLength)
++	_, err = io.ReadFull(p.bufConnReader, chID)
++	if err != nil {
++		return nil, err
++	}
++
++	// real message length
++	msgLength := int(frameLength) - chIDLength
++	msg := make([]byte, msgLength)
++	_, err = io.ReadFull(p.bufConnReader, msg)
++	if err != nil {
++		return nil, err
++	}
++
++	fullMessage := make([]byte, len(lenBuf)+ int(frameLength))
++	copy(fullMessage, lenBuf)
++	copy(fullMessage[len(lenBuf):], chID)
++	copy(fullMessage[len(lenBuf) + chIDLength :], msg)
++
++	return fullMessage, nil
++}
++
++
++func (p *marlinPeer) getFrameLength() (lenBuf []byte, n uint64, err error) {
++
++	lenBuf = make([]byte, 8)
++
++	_, err = p.bufConnReader.Read(lenBuf)
++	if err != nil {
++		return nil, 0, err
++	}
++
++	return lenBuf, uint64(binary.BigEndian.Uint64(lenBuf)), nil
++}
++
++func (p *marlinPeer) readMessage() ([]byte, error) {
++	var err error
++	if (p.peerRecvState == lengthWait) {
++		lenBuf := make([]byte, 8)
++		_, err = p.bufConnReader.Read(lenBuf)
++
++		if err != nil {
++			return nil, err
++		}
++
++		p.peerRecvState = messageWait
++		p.bytesPending = uint64(binary.BigEndian.Uint64(lenBuf))
++	}
++
++	if (p.peerRecvState == messageWait) {
++		// real message length
++		frameLength := p.bytesPending
++		frame := make([]byte, frameLength)
++		_, err = io.ReadFull(p.bufConnReader, frame)
++		if err != nil {
++			return nil, err
++		}
++
++		p.peerRecvState = lengthWait
++		p.bytesPending = 8
++		return frame, nil
++	}
++
++	return nil, err
++}
++
++func (p *marlinPeer) recvRoutine() {
++
++//FOR_LOOP:
++	for {
++		fullMessage, err := p.readMessage()
++
++		if err != nil {
++
++		} else {
++			// fmt.Printf("frame received %d\n", len(fullMessage));
++
++			chID := fullMessage[0];
++			msgBytes := fullMessage[1:];
++
++			reactor := p.rctByCh[chID]
++			if reactor == nil {
++				// Note that its ok to panic here as it's caught in the conn._recover,
++				// which does onPeerError.
++				panic(fmt.Sprintf("Unknown channel %X", chID))
++			}
++			reactor.Receive(chID, p, msgBytes)
++
++		}
++
++		// if err != nil {
++		// 	// stopServices was invoked and we are shutting down
++		// 	// receiving is excpected to fail since we will close the connection
++		// 	select {
++		// 	case <-c.quitRecvRoutine:
++		// 		break FOR_LOOP
++		// 	default:
++		// 	}
++
++		// 	if c.IsRunning() {
++		// 		if err == io.EOF {
++		// 			c.Logger.Info("Connection is closed @ recvRoutine (likely by the other side)", "conn", c)
++		// 		} else {
++		// 			c.Logger.Error("Connection failed @ recvRoutine (reading byte)", "conn", c, "err", err)
++		// 		}
++		// 		c.stopForError(err)
++		// 	}
++		// 	break FOR_LOOP
++		// }
++
++		// Read more depending on packet type.
++		// switch pkt := packet.(type) {
++		// case PacketMsg:
++		// 	channel, ok := c.channelsIdx[pkt.ChannelID]
++		// 	if !ok || channel == nil {
++		// 		err := fmt.Errorf("unknown channel %X", pkt.ChannelID)
++		// 		c.Logger.Error("Connection failed @ recvRoutine", "conn", c, "err", err)
++		// 		c.stopForError(err)
++		// 		break FOR_LOOP
++		// 	}
++
++		// 	msgBytes, err := channel.recvPacketMsg(pkt)
++		// 	if err != nil {
++		// 		if c.IsRunning() {
++		// 			c.Logger.Error("Connection failed @ recvRoutine", "conn", c, "err", err)
++		// 			c.stopForError(err)
++		// 		}
++		// 		break FOR_LOOP
++		// 	}
++		// 	if msgBytes != nil {
++		// 		c.Logger.Debug("Received bytes", "chID", pkt.ChannelID, "msgBytes", fmt.Sprintf("%X", msgBytes))
++		// 		// NOTE: This means the reactor.Receive runs in the same thread as the p2p recv routine
++		// 		c.onReceive(pkt.ChannelID, msgBytes)
++		// 	}
++		// default:
++		// 	err := fmt.Errorf("unknown message type %v", reflect.TypeOf(packet))
++		// 	c.Logger.Error("Connection failed @ recvRoutine", "conn", c, "err", err)
++		// 	c.stopForError(err)
++		// 	break FOR_LOOP
++		// }
++	}
++}
++
++// TrySend msg bytes to the channel identified by chID byte. Immediately returns
++// false if the send queue is full.
++func (p *marlinPeer) TrySend(chID byte, msgBytes []byte) bool {
++	return false
++}
++
++// Get the data for a given key.
++func (p *marlinPeer) Get(key string) interface{} {
++	return p.Data.Get(key)
++}
++
++// Set sets the data for the given key.
++func (p *marlinPeer) Set(key string, data interface{}) {
++	p.Data.Set(key, data)
++}
++
++// hasChannel returns true if the peer reported
++// knowing about the given chID.
++func (p *marlinPeer) hasChannel(chID byte) bool {
++	for _, ch := range p.channels {
++		if ch == chID {
++			return true
++		}
++	}
++	// NOTE: probably will want to remove this
++	// but could be helpful while the feature is new
++	p.Logger.Debug(
++		"Unknown channel for peer",
++		"channel",
++		chID,
++		"channels",
++		p.channels,
++	)
++	return false
++}
++
++// CloseConn closes original connection. Used for cleaning up in cases where the peer had not been started at all.
++func (p *marlinPeer) CloseConn() error {
++	return p.peerConn.conn.Close()
++}
++
++//---------------------------------------------------
++// methods only used for testing
++// TODO: can we remove these?
++
++// RemoteAddr returns peer's remote network address.
++func (p *marlinPeer) RemoteAddr() net.Addr {
++	return p.peerConn.conn.RemoteAddr()
++}
++
++// CanSend returns true if the send queue is not full, false otherwise.
++func (p *marlinPeer) CanSend(chID byte) bool {
++	if !p.IsRunning() {
++		return false
++	}
++	return true
++}
+diff --git a/p2p/peer_test.go b/p2p/peer_test.go
+index 508cef7f..f3173e22 100644
+--- a/p2p/peer_test.go
++++ b/p2p/peer_test.go
+@@ -35,6 +35,8 @@ func TestPeerBasic(t *testing.T) {
+ 	require.Nil(err)
+ 	defer p.Stop()
+ 
++	fmt.Sprintf(p.SocketAddr().String());
++
+ 	assert.True(p.IsRunning())
+ 	assert.True(p.IsOutbound())
+ 	assert.False(p.IsPersistent())
+@@ -44,6 +46,29 @@ func TestPeerBasic(t *testing.T) {
+ 	assert.Equal(rp.ID(), p.ID())
+ }
+ 
++func TestMarlinPeerBasic(t *testing.T) {
++	assert, require := assert.New(t), require.New(t)
++
++	// simulate remote peer
++	rp := &remotePeer{PrivKey: ed25519.GenPrivKey(), Config: cfg}
++	rp.Start()
++	defer rp.Stop()
++
++	p, err := createMarlinOutboundPeer(rp.Addr(), cfg, true, true)
++	require.Nil(err)
++
++	err = p.Start()
++	require.Nil(err)
++	defer p.Stop()
++
++	assert.True(p.IsRunning())
++	assert.True(p.IsOutbound())
++	p.persistent = true
++	assert.True(p.IsPersistent())
++	assert.Equal(rp.Addr().DialString(), p.RemoteAddr().String())
++	assert.Equal(rp.ID(), p.ID())
++}
++
+ func TestPeerSend(t *testing.T) {
+ 	assert, require := assert.New(t), require.New(t)
+ 
+@@ -66,6 +91,61 @@ func TestPeerSend(t *testing.T) {
+ 	assert.True(p.Send(testCh, []byte("Asylum")))
+ }
+ 
++func TestMarlinPeerSend(t *testing.T) {
++	assert, require := assert.New(t), require.New(t)
++
++	config := cfg
++
++	na, err := NewNetAddressString("0000000000000000000000000000000000000000@0.0.0.0:8000")
++	require.Nil(err)
++
++	p, err := createMarlinOutboundPeer(na, config, true, true)
++	require.Nil(err)
++
++	err = p.Start()
++	require.Nil(err)
++
++	defer p.Stop()
++
++	assert.True(p.CanSend(testCh))
++	assert.True(p.Send(testCh, []byte("Asylum")))
++	time.Sleep(10*time.Second)
++}
++
++func createMarlinOutboundPeer(
++	addr *NetAddress,
++	config *config.P2PConfig,
++	outbound bool,
++	persistent bool,
++) (*marlinPeer, error) {
++
++	chDescs := []*tmconn.ChannelDescriptor{
++		{ID: testCh, Priority: 1},
++	}
++	reactorsByCh := map[byte]Reactor{testCh: NewTestReactor(chDescs, true)}
++
++
++	var pc peerConn
++
++	if config.TestDialFail {
++		return nil, fmt.Errorf("dial err (peerConfig.DialFail == true)")
++	}
++	conn, err := addr.DialTimeout(cfg.DialTimeout)
++	if err != nil {
++		return nil, err
++	}
++
++	// upgrage secret connection to be skipped
++	// pc, err = testPeerConn(conn, config, true, persistent, ourNodePrivKey, addr)
++	pc = newPeerConn(outbound, persistent, conn, addr)
++
++	peerNodeInfo:= testNodeInfo(addr.ID, "host_peer")
++
++	p := newMarlinPeer(pc, peerNodeInfo, reactorsByCh, chDescs, func(p Peer, r interface{}) {})
++	p.SetLogger(log.TestingLogger().With("peer", addr))
++	return p, nil
++}
++
+ func createOutboundPeerAndPerformHandshake(
+ 	addr *NetAddress,
+ 	config *config.P2PConfig,
+diff --git a/p2p/switch.go b/p2p/switch.go
+index bc675cdb..411ccba1 100644
+--- a/p2p/switch.go
++++ b/p2p/switch.go
+@@ -91,6 +91,8 @@ type Switch struct {
+ 	rng *rand.Rand // seed for randomizing dial times and orders
+ 
+ 	metrics *Metrics
++
++	marlinTcpPeer *marlinPeer
+ }
+ 
+ // NetAddress returns the address the switch is listening on.
+@@ -260,7 +262,7 @@ func (sw *Switch) OnStop() {
+ //
+ // NOTE: Broadcast uses goroutines, so order of broadcast may not be preserved.
+ func (sw *Switch) Broadcast(chID byte, msgBytes []byte) chan bool {
+-	sw.Logger.Debug("Broadcast", "channel", chID, "msgBytes", fmt.Sprintf("%X", msgBytes))
++	sw.Logger.Info("Broadcast", "channel", chID, "msgBytes", fmt.Sprintf("%X", msgBytes))
+ 
+ 	peers := sw.peers.List()
+ 	var wg sync.WaitGroup
+@@ -435,6 +437,15 @@ func (sw *Switch) MarkPeerAsGood(peer Peer) {
+ 	}
+ }
+ 
++func (sw *Switch) SendOnMarlinPeer(chID byte, msgBytes []byte) bool {
++	if sw.marlinTcpPeer != nil {
++		sw.Logger.Info("Sending to marlin TCP server", "channel", chID, "msgBytes", fmt.Sprintf("%X", msgBytes))
++		return sw.marlinTcpPeer.Send(chID, msgBytes)
++	}
++
++	return false
++}
++
+ //---------------------------------------------------------------------
+ // Dialing
+ 
+@@ -447,6 +458,59 @@ func isPrivateAddr(err error) bool {
+ 	return ok && te.PrivateAddr()
+ }
+ 
++func (sw *Switch) DialMarlinPeer(
++	addr *NetAddress,
++	channels []byte,
++) error {
++	outbound := true
++	persistent := true
++
++	var pc peerConn
++
++	sw.Logger.Info("Dialing Marlin TCP peer")
++
++	conn, err := addr.DialTimeout(sw.config.DialTimeout)
++	if err != nil {
++		return err
++	}
++
++	// upgrage secret connection to be skipped
++	// pc, err = testPeerConn(conn, config, true, persistent, ourNodePrivKey, addr)
++	pc = newPeerConn(outbound, persistent, conn, addr)
++
++	// TODO change it
++	peerNodeInfo:= 	DefaultNodeInfo {
++		ProtocolVersion: defaultProtocolVersion,
++		DefaultNodeID:   addr.ID,
++		ListenAddr:      fmt.Sprintf("127.0.0.1:%d", getFreePort()),
++		Network:         "Abcd",
++		Version:         "1.2.3-rc0-deadbeef",
++		Channels:        channels,
++		Moniker:         "marlin_tcp_peer",
++		Other: DefaultNodeInfoOther{
++			TxIndex:    "on",
++			RPCAddress: fmt.Sprintf("127.0.0.1:%d", getFreePort()),
++		},
++	}
++
++	sw.marlinTcpPeer = newMarlinPeer(pc, peerNodeInfo, sw.reactorsByCh, sw.chDescs, func(p Peer, r interface{}) {})
++
++	sw.marlinTcpPeer.SetLogger(sw.Logger.With("peer", sw.marlinTcpPeer.SocketAddr()))
++
++	err = sw.marlinTcpPeer.Start()
++	if err != nil {
++		// Should never happen
++		sw.Logger.Error("Error starting marlin Tcp Peer", "err", err)
++		return err
++	}
++
++	// TODO
++	// add peer? sets logger
++	// adds reactors initializes routines
++
++	return nil
++}
++
+ // DialPeersAsync dials a list of peers asynchronously in random order.
+ // Used to dial peers from config on startup or from unsafe-RPC (trusted sources).
+ // It ignores ErrNetAddressLookup. However, if there are other errors, first
