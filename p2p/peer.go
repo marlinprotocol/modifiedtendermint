@@ -5,7 +5,6 @@ import (
 	"io"
 	"net"
 	"time"
-	"io"
 
 	"github.com/tendermint/tendermint/libs/cmap"
 	"github.com/tendermint/tendermint/libs/log"
