@@ -2,6 +2,7 @@ package p2p
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"time"
 	"io"
@@ -407,7 +408,6 @@ func createMConnection(
 	)
 }
 
-
 // Blockchain Reactor Events (the input to the state machine)
 type recvState uint
 
@@ -479,7 +479,6 @@ func newMarlinPeer(
 	for k, v := range reactorsByCh {
 		p.rctByCh[k] = v
 	}
-
 
 	p.BaseService = *service.NewBaseService(nil, "MarlinPeer", p)
 	for _, option := range options {
@@ -644,7 +643,6 @@ func (p *marlinPeer) ReadFrame() ([]byte, error) {
 
 	return fullMessage, nil
 }
-
 
 func (p *marlinPeer) getFrameLength() (lenBuf []byte, n uint64, err error) {
 

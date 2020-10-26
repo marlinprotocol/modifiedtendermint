@@ -272,7 +272,7 @@ func (sw *Switch) OnStop() {
 //
 // NOTE: Broadcast uses goroutines, so order of broadcast may not be preserved.
 func (sw *Switch) Broadcast(chID byte, msgBytes []byte) chan bool {
-	sw.Logger.Debug("Broadcast", "channel", chID, "msgBytes", fmt.Sprintf("%X", msgBytes))
+	sw.Logger.Info("Broadcast", "channel", chID, "msgBytes", fmt.Sprintf("%X", msgBytes))
 
 	peers := sw.peers.List()
 	var wg sync.WaitGroup
@@ -449,6 +449,15 @@ func (sw *Switch) MarkPeerAsGood(peer Peer) {
 	}
 }
 
+func (sw *Switch) SendOnMarlinPeer(chID byte, msgBytes []byte) bool {
+	if sw.marlinTcpPeer != nil {
+		sw.Logger.Info("Sending to marlin TCP server", "channel", chID, "msgBytes", fmt.Sprintf("%X", msgBytes))
+		return sw.marlinTcpPeer.Send(chID, msgBytes)
+	}
+
+	return false
+}
+
 //---------------------------------------------------------------------
 // Dialing
 
@@ -460,7 +469,6 @@ func isPrivateAddr(err error) bool {
 	te, ok := err.(privateAddr)
 	return ok && te.PrivateAddr()
 }
-
 
 func (sw *Switch) DialMarlinPeer(
 	addr *NetAddress,

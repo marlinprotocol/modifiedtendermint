@@ -1781,6 +1781,7 @@ func (cs *State) defaultMarlinSetProposal(proposal *types.Proposal) error {
 	// 	return ErrInvalidProposalSignature
 	// }
 
+
 	cs.Proposal = proposal
 	// We don't update cs.ProposalBlockParts if it is already set.
 	// This happens if we're already in cstypes.RoundStepCommit or if there is a valid block in the current round.
@@ -1798,6 +1799,8 @@ func (cs *State) defaultMarlinSetProposal(proposal *types.Proposal) error {
 func (cs *State) addProposalBlockPart(msg *BlockPartMessage, peerID p2p.ID) (added bool, err error) {
 	height, round, part := msg.Height, msg.Round, msg.Part
 
+	cs.Logger.Info("Receiving a block part",
+		"height", height, "round", round, "index", part.Index, "peer", peerID)
 	// Blocks might be reused, so round mismatch is OK
 	if cs.Height != height {
 		cs.Logger.Debug("Received block part from wrong height", "height", height, "round", round)
@@ -1813,6 +1816,9 @@ func (cs *State) addProposalBlockPart(msg *BlockPartMessage, peerID p2p.ID) (add
 		return false, nil
 	}
 
+	cs.Logger.Info("Adding a block part",
+		"height", height, "round", round, "index", part.Index, "peer", peerID)
+
 	added, err = cs.ProposalBlockParts.AddPart(part)
 	if err != nil {
 		return added, err
@@ -1823,6 +1829,7 @@ func (cs *State) addProposalBlockPart(msg *BlockPartMessage, peerID p2p.ID) (add
 		)
 	}
 	if added && cs.ProposalBlockParts.IsComplete() {
+		cs.Logger.Info("complete proposal block parts")
 		bz, err := ioutil.ReadAll(cs.ProposalBlockParts.GetReader())
 		if err != nil {
 			return added, err
