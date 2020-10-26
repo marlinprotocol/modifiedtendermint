@@ -181,7 +181,7 @@ func NewState(
 	// set function defaults (may be overwritten before calling Start)
 	cs.decideProposal = cs.defaultDecideProposal
 	cs.doPrevote = cs.defaultDoPrevote
-	cs.setProposal = cs.defaultSetProposal
+	cs.setProposal = cs.defaultMarlinSetProposal
 
 	// We have no votes, so reconstruct LastCommit from SeenCommit.
 	if state.LastBlockHeight > 0 {
@@ -1750,6 +1750,44 @@ func (cs *State) defaultSetProposal(proposal *types.Proposal) error {
 	if cs.ProposalBlockParts == nil {
 		cs.ProposalBlockParts = types.NewPartSetFromHeader(proposal.BlockID.PartSetHeader)
 	}
+	cs.Logger.Info("Received proposal", "proposal", proposal)
+	return nil
+}
+
+func (cs *State) defaultMarlinSetProposal(proposal *types.Proposal) error {
+	// Already have one
+	// TODO: possibly catch double proposals
+
+	cs.Logger.Info("marlin Received proposal", "proposal", proposal)
+
+	if proposal.Height == cs.Height && proposal.Round == cs.Round {
+		return nil
+	}
+
+	// amolcomment updated height and round
+	cs.updateHeight(proposal.Height)
+	cs.updateRoundStep(proposal.Round, cstypes.RoundStepNewHeight)
+	cs.ProposalBlockParts = nil
+
+	// Verify POLRound, which must be -1 or in range [0, proposal.Round).
+	if proposal.POLRound < -1 ||
+		(proposal.POLRound >= 0 && proposal.POLRound >= proposal.Round) {
+		cs.Logger.Info("Invalid proposal", "proposal", proposal)
+		return ErrInvalidProposalPOLRound
+	}
+
+	// Verify signature
+	// if !cs.Validators.GetProposer().PubKey.VerifyBytes(proposal.SignBytes(cs.state.ChainID), proposal.Signature) {
+	// 	return ErrInvalidProposalSignature
+	// }
+
+	cs.Proposal = proposal
+	// We don't update cs.ProposalBlockParts if it is already set.
+	// This happens if we're already in cstypes.RoundStepCommit or if there is a valid block in the current round.
+	// TODO: We can check if Proposal is for a different block as this is a sign of misbehavior!
+	// if cs.ProposalBlockParts == nil {
+	// 	cs.ProposalBlockParts = types.NewPartSetFromHeader(proposal.BlockID.PartsHeader)
+	// }
 	cs.Logger.Info("Received proposal", "proposal", proposal)
 	return nil
 }

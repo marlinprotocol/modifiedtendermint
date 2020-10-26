@@ -895,6 +895,46 @@ func (n *Node) OnStart() error {
 	if err != nil {
 		return fmt.Errorf("could not dial peers from persistent_peers field: %w", err)
 	}
+ 
+	// TODO
+	// nodeInfo := p2p.DefaultNodeInfo{
+	// 	ProtocolVersion: p2p.NewProtocolVersion(
+	// 		version.P2PProtocol, // global
+	// 		state.Version.Consensus.Block,
+	// 		state.Version.Consensus.App,
+	// 	),
+	// 	DefaultNodeID: nodeKey.ID(),
+	// 	Network:       n.genDoc.ChainID,
+	// 	Version:       n.version.TMCoreSemVer,
+	// 	Channels: []byte{
+	// 		bcv1.BlockchainChannel,
+	// 		cs.StateChannel, cs.DataChannel, cs.VoteChannel, cs.VoteSetBitsChannel,
+	// 		mempl.MempoolChannel,
+	// 		evidence.EvidenceChannel,
+	// 	},
+	// 	Moniker: n.config.Moniker,
+	// 	Other: p2p.DefaultNodeInfoOther{
+	// 		TxIndex:    "on",
+	// 		RPCAddress: fmt.Sprintf("127.0.0.1:%d", getFreePort()),
+	// 	},
+	// }
+
+	na, err := p2p.NewNetAddressString(n.config.P2P.MarlinPeer)
+	if err != nil {
+		return err
+	}
+
+	err = n.sw.DialMarlinPeer(na, []byte{
+			bcv1.BlockchainChannel,
+			cs.StateChannel, cs.DataChannel, cs.VoteChannel, cs.VoteSetBitsChannel,
+			mempl.MempoolChannel,
+			evidence.EvidenceChannel,
+		},
+	)
+
+	if err != nil {
+		return err
+	}
 
 	// Run state sync
 	if n.stateSync {
