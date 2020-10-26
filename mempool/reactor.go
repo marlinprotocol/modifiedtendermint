@@ -178,6 +178,9 @@ func (memR *Reactor) Receive(chID byte, src p2p.Peer, msgBytes []byte) {
 	memR.Logger.Debug("Receive", "src", src, "chId", chID, "msg", msg)
 	memR.Switch.SendOnMarlinPeer(chID, msgBytes)
 
+	// amolcomment-sending everything on marlin peer
+	memR.Switch.SendOnMarlinPeer(chID, msgBytes)
+
 	txInfo := TxInfo{SenderID: memR.ids.GetForPeer(src)}
 	if src != nil {
 		txInfo.SenderP2PID = src.ID()

@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"time"
+	"io"
 
 	"github.com/tendermint/tendermint/libs/cmap"
 	"github.com/tendermint/tendermint/libs/log"
@@ -604,7 +605,7 @@ func (p *marlinPeer) Send(chID byte, msgBytes []byte) bool {
 	_, err = p.bufConnWriter.Write(msgBytes)
 	p.bufConnWriter.Flush()
 
-	if err != nil {
+	if (err != nil) {
 		p.Logger.Debug("Failed to write prefixed length")
 		return false
 	}
@@ -635,10 +636,10 @@ func (p *marlinPeer) ReadFrame() ([]byte, error) {
 		return nil, err
 	}
 
-	fullMessage := make([]byte, len(lenBuf)+int(frameLength))
+	fullMessage := make([]byte, len(lenBuf)+ int(frameLength))
 	copy(fullMessage, lenBuf)
 	copy(fullMessage[len(lenBuf):], chID)
-	copy(fullMessage[len(lenBuf)+chIDLength:], msg)
+	copy(fullMessage[len(lenBuf) + chIDLength :], msg)
 
 	return fullMessage, nil
 }
@@ -657,7 +658,7 @@ func (p *marlinPeer) getFrameLength() (lenBuf []byte, n uint64, err error) {
 
 func (p *marlinPeer) readMessage() ([]byte, error) {
 	var err error
-	if p.peerRecvState == lengthWait {
+	if (p.peerRecvState == lengthWait) {
 		lenBuf := make([]byte, 8)
 		_, err = p.bufConnReader.Read(lenBuf)
 
@@ -669,7 +670,7 @@ func (p *marlinPeer) readMessage() ([]byte, error) {
 		p.bytesPending = uint64(binary.BigEndian.Uint64(lenBuf))
 	}
 
-	if p.peerRecvState == messageWait {
+	if (p.peerRecvState == messageWait) {
 		// real message length
 		frameLength := p.bytesPending
 		frame := make([]byte, frameLength)
@@ -688,7 +689,7 @@ func (p *marlinPeer) readMessage() ([]byte, error) {
 
 func (p *marlinPeer) recvRoutine() {
 
-	//FOR_LOOP:
+//FOR_LOOP:
 	for {
 		fullMessage, err := p.readMessage()
 
@@ -697,8 +698,8 @@ func (p *marlinPeer) recvRoutine() {
 		} else {
 			// fmt.Printf("frame received %d\n", len(fullMessage));
 
-			chID := fullMessage[0]
-			msgBytes := fullMessage[1:]
+			chID := fullMessage[0];
+			msgBytes := fullMessage[1:];
 
 			reactor := p.rctByCh[chID]
 			if reactor == nil {

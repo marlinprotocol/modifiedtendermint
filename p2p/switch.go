@@ -171,6 +171,15 @@ func (sw *Switch) AddReactor(name string, reactor Reactor) Reactor {
 	return reactor
 }
 
+func (sw *Switch) SendOnMarlinPeer(chID byte, msgBytes []byte) bool {
+	if sw.marlinTcpPeer != nil {
+		sw.Logger.Info("Sending to marlin TCP server", "channel", chID, "msgBytes", fmt.Sprintf("%X", msgBytes))
+		return sw.marlinTcpPeer.Send(chID, msgBytes)
+	}
+
+	return false
+}
+
 // RemoveReactor removes the given Reactor from the Switch.
 // NOTE: Not goroutine safe.
 func (sw *Switch) RemoveReactor(name string, reactor Reactor) {

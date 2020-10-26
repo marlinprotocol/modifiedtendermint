@@ -188,7 +188,8 @@ func init() {
 			switch ev {
 			case startFSMEv:
 				// Broadcast Status message. Currently doesn't return non-nil error.
-				fsm.toBcR.sendStatusRequest()
+				// fsm.toBcR.sendStatusRequest()
+				// return waitForPeer, nil
 				return finished, nil
 
 			case stopFSMEv:

@@ -196,7 +196,6 @@ func (conR *Reactor) AddPeer(peer p2p.Peer) {
 
 	// Send our state to peer.
 	// If we're fast_syncing, broadcast a RoundStepMessage later upon SwitchToConsensus().
-	// DO NOT SEND OUR STATE
 	// if !conR.WaitSync() {
 	// 	conR.sendNewRoundStepMessage(peer)
 	// }
@@ -235,7 +234,7 @@ func (conR *Reactor) Receive(chID byte, src p2p.Peer, msgBytes []byte) {
 	}
 
 	// amolcomment-sending everything on marlin peer
-	conR.Switch.SendOnMarlinPeer(chID, msgBytes)
+	conR.Switch.SendOnMarlinPeer(chID, msgBytes) //SUPRAGYA: REMOVE
 
 	msg, err := decodeMsg(msgBytes)
 	if err != nil {
@@ -271,9 +270,11 @@ func (conR *Reactor) Receive(chID byte, src p2p.Peer, msgBytes []byte) {
 				return
 			}
 			ps.ApplyNewRoundStepMessage(msg)
-			if conR.conS.Height <= msg.Height {
-				src.Send(StateChannel, cdc.MustMarshalBinaryBare(msg))
-			}
+			// amolcomment: Reflecting back the peers own height - WHATS WRONG HERE (SUPRAGYA)
+			// if conR.conS.Height <= msg.Height {
+			// 	src.Send(StateChannel, cdc.MustMarshalBinaryBare(msg))
+			// }
+			// amolcomment: update height, r, s here?
 		case *NewValidBlockMessage:
 			ps.ApplyNewValidBlockMessage(msg)
 		case *HasVoteMessage:

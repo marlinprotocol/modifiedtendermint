@@ -256,7 +256,6 @@ seeds = "{{ .P2P.Seeds }}"
 # Comma separated list of nodes to keep persistent connections to
 persistent_peers = "{{ .P2P.PersistentPeers }}"
 
-# Marlin Peer
 marlin_peer = "{{ .P2P.MarlinPeer }}"
 
 # UPNP port forwarding
