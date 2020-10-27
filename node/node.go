@@ -494,7 +494,7 @@ func createSwitch(config *cfg.Config,
 		p2p.WithMetrics(p2pMetrics),
 		p2p.SwitchPeerFilters(peerFilters...),
 	)
-	p2pLogger.Error("SUP: Addubg 5 reactors")
+	p2pLogger.Info("SUP: Addubg 5 reactors")
 	sw.SetLogger(p2pLogger)
 	sw.AddReactor("MEMPOOL", mempoolReactor)
 	sw.AddReactor("BLOCKCHAIN", bcReactor)

@@ -91,10 +91,11 @@ func (l *filter) With(keyvals ...interface{}) Logger {
 				// Example:
 				//		logger = log.NewFilter(logger, log.AllowError(), log.AllowInfoWith("module", "crypto"))
 				//		logger.With("module", "crypto")
+				fmt.Println(allowed)
 				if keyvals[i+1] == kv.value {
 					return &filter{
 						next:             l.next.With(keyvals...),
-						allowed:          allowed, // set the desired level
+						allowed:          1, // set the desired level
 						allowedKeyvals:   l.allowedKeyvals,
 						initiallyAllowed: l.initiallyAllowed,
 					}
