@@ -13,7 +13,7 @@ import (
 )
 
 func main() {
-	fmt.Println("Here is main")
+	fmt.Println("SUP: Starting point: Here is main")
 	rootCmd := cmd.RootCmd
 	rootCmd.AddCommand(
 		cmd.GenValidatorCmd,

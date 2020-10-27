@@ -758,6 +758,7 @@ func NewNode(config *cfg.Config,
 	transport, peerFilters := createTransport(config, nodeInfo, nodeKey, proxyApp)
 
 	// Setup Switch.
+	log.AllowInfoWith("module", "p2p")
 	p2pLogger := logger.With("module", "p2p")
 	sw := createSwitch(
 		config, transport, p2pMetrics, peerFilters, mempoolReactor, bcReactor,
