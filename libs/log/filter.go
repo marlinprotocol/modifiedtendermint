@@ -93,7 +93,7 @@ func (l *filter) With(keyvals ...interface{}) Logger {
 				//		logger.With("module", "crypto")
 				// fmt.Printf(allowed)
 				if keyvals[i+1] == kv.value {
-					fmt.Printf("This is log level")
+					fmt.Printf("This is log level", kv.key)
 					return &filter{
 						next:             l.next.With(keyvals...),
 						allowed:          allowed, // set the desired level
