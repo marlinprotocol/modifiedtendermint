@@ -802,6 +802,8 @@ func NewNode(config *cfg.Config,
 		}()
 	}
 
+	logger.Info("SUP: Config reading done, creating node")
+
 	node := &Node{
 		config:        config,
 		genesisDoc:    genDoc,
