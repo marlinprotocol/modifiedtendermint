@@ -572,7 +572,8 @@ func (p *marlinPeer) Status() tmconn.ConnectionStatus {
 // send queue is full after timeout, specified by MConnection.
 func (p *marlinPeer) Send(chID byte, msgBytes []byte) bool {
  if !p.SenseMarlinPortFixIfNeeded() {
-   p.Logger.Error("Could not sense marlinport")
+   	p.Logger.Error("Could not sense marlinport")
+	time.Sleep(200 * time.Millisecond)
     return false
  }
 
@@ -690,7 +691,8 @@ func (p *marlinPeer) recvRoutine() {
 //FOR_LOOP:
  for {
    if !p.SenseMarlinPortFixIfNeeded() {
-     p.Logger.Error("Could not sense marlinport")
+	 p.Logger.Error("Could not sense marlinport")
+	 time.Sleep(200 * time.Millisecond)
      continue
    }
 
@@ -811,7 +813,7 @@ func (p *marlinPeer) RemoteAddr() net.Addr {
  return p.peerConn.conn.RemoteAddr()
 }
 
-var senseMarlinSkips = 500
+var senseMarlinSkips = 20
 var currentMarlinSkips = 0
 var currentMarlinState = true
 
