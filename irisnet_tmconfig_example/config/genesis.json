@@ -1,0 +1,30 @@
+{
+  "genesis_time": "2020-11-02T12:35:23.179246185Z",
+  "chain_id": "irishub",
+  "consensus_params": {
+    "block_size": {
+      "max_bytes": "22020096",
+      "max_gas": "-1"
+    },
+    "evidence": {
+      "max_age": "100000"
+    },
+    "validator": {
+      "pub_key_types": [
+        "ed25519"
+      ]
+    }
+  },
+  "validators": [
+    {
+      "address": "74E42BF9E0125D25DC06BBEF59996B608B04EC33",
+      "pub_key": {
+        "type": "tendermint/PubKeyEd25519",
+        "value": "OTmK9PYjUnPIQrSVNx+wSzKlZVj8lBrK1RXPHrn0/W0="
+      },
+      "power": "10",
+      "name": ""
+    }
+  ],
+  "app_hash": ""
+}
